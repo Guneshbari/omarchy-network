@@ -10,8 +10,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "gnx.network"
-  ipcTarget: "gnx.network"
+  moduleName: "community.network"
+  ipcTarget: "community.network"
   // manageIpc: false so this panel can own the single IpcHandler the target
   // permits — needed for the toggleNetwork method below.
   manageIpc: false
@@ -244,7 +244,7 @@ Panel {
   }
 
   IpcHandler {
-    target: "gnx.network"
+    target: "community.network"
 
     function open() { root.open() }
     function close() { root.close() }

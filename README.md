@@ -39,7 +39,7 @@ To replace the default network widget in your status bar, update `~/.config/omar
   "bar": {
     "sections": {
       "right": [
-        { "id": "gnx.network" }
+        { "id": "community.network" }
       ]
     }
   }
