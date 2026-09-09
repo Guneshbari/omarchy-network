@@ -54,6 +54,23 @@ omarchy restart shell
 
 ---
 
+## Uninstallation
+
+To disable and remove the plugin:
+
+```bash
+omarchy plugin disable community.network
+omarchy plugin remove community.network
+```
+
+To restore the default network widget in your status bar, update `~/.config/omarchy/shell.json` to reference `"omarchy.network"` instead of `"community.network"`, then reload:
+
+```bash
+omarchy restart shell
+```
+
+---
+
 ## Keyboard Navigation Reference
 
 | Key(s) | Context | Action |
