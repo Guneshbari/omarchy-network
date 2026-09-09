@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "gnx.network",
+  "name": "Network Manager",
+  "version": "1.0.0",
+  "author": "Gunesh Bari",
+  "license": "MIT",
+  "description": "Network status and manager for Omarchy with Wi-Fi, DNS selection, and full interactive Wired Ethernet configuration (DHCP & Static IP) with keyboard navigation.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Network",
+    "description": "Network status, Wi-Fi, wired Ethernet, and DNS",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
