@@ -548,7 +548,22 @@ var hotspotApplyScript =
 
 var hotspotQrScript =
   'ssid="$1"; pwd="$2"; ' +
-  'if [[ -z "$ssid" ]]; then ssid="Omarchy-Hotspot"; fi; ' +
+  'if [[ -z "$ssid" || -z "$pwd" ]]; then ' +
+  '  con=""; ' +
+  '  for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
+  '    mode=$(nmcli -g 802-11-wireless.mode con show "$uuid" 2>/dev/null); ' +
+  '    if [[ "$mode" == "ap" ]]; then con=$(nmcli -g connection.id con show "$uuid" 2>/dev/null); break; fi; ' +
+  '  done; ' +
+  '  if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
+  '  if [[ -z "$ssid" ]]; then ' +
+  '    nm_s=$(nmcli -s -g 802-11-wireless.ssid connection show "$con" 2>/dev/null || true); ' +
+  '    ssid="${nm_s:-Omarchy-Hotspot}"; ' +
+  '  fi; ' +
+  '  if [[ -z "$pwd" ]]; then ' +
+  '    nm_p=$(nmcli -s -g 802-11-wireless-security.psk connection show "$con" 2>/dev/null || true); ' +
+  '    pwd="$nm_p"; ' +
+  '  fi; ' +
+  'fi; ' +
   'escape_wifi_qr() { ' +
   '  local value=$1; ' +
   '  value=${value//\\\\/\\\\\\\\}; ' +
@@ -562,7 +577,7 @@ var hotspotQrScript =
   'else ' +
   '  payload="WIFI:T:nopass;S:$(escape_wifi_qr "$ssid");;"; ' +
   'fi; ' +
-  'ascii=$(printf "%s" "$payload" | qrencode --type ASCII --margin 4 --output - 2>/dev/null); ' +
+  'ascii=$(printf "%s" "$payload" | qrencode --type ASCII --margin 4 --output -); ' +
   'while IFS= read -r line; do ' +
   '  row=""; ' +
   '  for ((column = 0; column < ${#line}; column += 2)); do ' +

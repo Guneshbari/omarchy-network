@@ -149,6 +149,7 @@ Panel {
   property int hotspotQrSize: 0
   property bool hotspotQrLoading: false
   property string hotspotQrError: ""
+  property bool hotspotExpectedStop: false
   property bool hotspotOverlayPasswordVisible: false
   property bool hotspotPasswordCopied: false
   readonly property bool hotspotQrShowingCode: hotspotQrSize > 0 && !hotspotQrLoading && hotspotQrError === ""
@@ -989,6 +990,7 @@ Panel {
   function summonHotspotQr() {
     root.close()
     root.hotspotQrOpen = true
+    root.hotspotExpectedStop = false
     root.hotspotOverlayPasswordVisible = false
     root.hotspotPasswordCopied = false
     root.generateHotspotQr()
@@ -1004,6 +1006,7 @@ Panel {
     root.hotspotQrLoading = false
     root.hotspotOverlayPasswordVisible = false
     root.hotspotPasswordCopied = false
+    root.hotspotExpectedStop = true
     if (hotspotQrProc.running) {
       hotspotQrProc.running = false
     }
@@ -1011,8 +1014,10 @@ Panel {
 
   function generateHotspotQr() {
     if (hotspotQrProc.running) {
+      root.hotspotExpectedStop = true
       hotspotQrProc.running = false
     }
+    root.hotspotExpectedStop = false
     root.hotspotQrLoading = true
     root.hotspotQrError = ""
     root.hotspotQrSize = 0
@@ -1023,6 +1028,18 @@ Panel {
       root.hotspotPassword || ""
     ]
     hotspotQrProc.running = true
+  }
+
+  function updateHotspotQr(text) {
+    var parsed = Model.parseQrMatrix(text)
+    root.hotspotQrRows = parsed.rows
+    root.hotspotQrSize = parsed.size
+    root.hotspotQrLoading = false
+    if (root.hotspotQrSize > 0) {
+      root.hotspotQrError = ""
+    } else if (root.hotspotQrError === "") {
+      root.hotspotQrError = "Could not generate Wi-Fi QR code"
+    }
   }
 
   function copyHotspotPassword() {
@@ -1327,30 +1344,33 @@ Panel {
   Process {
     id: hotspotQrProc
     stdout: StdioCollector {
+      id: qrStdout
       waitForEnd: true
-      onStreamFinished: function(text) {
-        var parsed = Model.parseQrMatrix(text)
-        root.hotspotQrRows = parsed.rows
-        root.hotspotQrSize = parsed.size
-        root.hotspotQrLoading = false
-        if (root.hotspotQrSize === 0 && root.hotspotQrError === "") {
-          root.hotspotQrError = "Could not generate Wi-Fi QR code"
+      onStreamFinished: {
+        if (!root.hotspotExpectedStop) {
+          root.updateHotspotQr(qrStdout.text)
         }
       }
     }
     stderr: StdioCollector {
+      id: qrStderr
       waitForEnd: true
-      onStreamFinished: function(text) {
-        var err = String(text || "").trim()
-        if (err !== "") root.hotspotQrError = err
+      onStreamFinished: {
+        if (!root.hotspotExpectedStop) {
+          var err = String(qrStderr.text || "").trim()
+          if (err !== "") root.hotspotQrError = err
+        }
       }
     }
     onExited: function(exitCode) {
       root.hotspotQrLoading = false
-      if (exitCode !== 0 || root.hotspotQrSize === 0) {
+      if (root.hotspotExpectedStop) return
+      if (exitCode !== 0) {
         root.hotspotQrSize = 0
         root.hotspotQrRows = []
-        if (root.hotspotQrError === "") root.hotspotQrError = "Could not generate Wi-Fi QR code"
+        if (root.hotspotQrError === "") {
+          root.hotspotQrError = "Could not generate Wi-Fi QR code"
+        }
       }
     }
   }
