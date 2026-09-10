@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import Quickshell.Networking
 import qs.Ui
 import qs.Commons
@@ -143,11 +144,14 @@ Panel {
   property bool hotspotInputFocused: false
   property int hotspotRow: 0
   property int hotspotActionIndex: 0
-  property bool hotspotShowingQr: false
+  property bool hotspotQrOpen: false
   property var hotspotQrRows: []
   property int hotspotQrSize: 0
   property bool hotspotQrLoading: false
+  property string hotspotQrError: ""
+  property bool hotspotOverlayPasswordVisible: false
   property bool hotspotPasswordCopied: false
+  readonly property bool hotspotQrShowingCode: hotspotQrSize > 0 && !hotspotQrLoading && hotspotQrError === ""
 
   // ConnectionFailReason values as a plain object, so Model.js helpers stay
   // pure JS and Node-testable.
@@ -175,7 +179,7 @@ Panel {
   property int headerIndex: 0
   readonly property bool canDisconnect: !!connectedWifiNetwork
   readonly property bool headerHasDisconnect: false
-  readonly property bool canShareWifi: info.type === "wifi" && canShareNetwork(connectedWifiNetwork)
+  readonly property bool canShareWifi: (info.type === "wifi" && canShareNetwork(connectedWifiNetwork)) || root.hotspotActive
   // The hero switch is the Wi-Fi radio, so it only exists when there is a
   // radio to switch. On a wired box it would otherwise sit there reading
   // "off" beside a perfectly live Ethernet connection.
@@ -271,6 +275,8 @@ Panel {
     // Compat routes for configs that summon the centered cards through the
     // network target; both cards are their own plugins now.
     function showQr() { root.summonWifiQr(true) }
+    function showHotspotQr() { root.summonHotspotQr() }
+    function dismissHotspotQr() { root.dismissHotspotQr() }
     function speedTest() { root.summonSpeedTest() }
   }
 
@@ -284,11 +290,16 @@ Panel {
     function toggle() { root.toggle() }
     function toggleNetwork() { root.toggleNetwork() }
     function showQr() { root.summonWifiQr(true) }
+    function showHotspotQr() { root.summonHotspotQr() }
+    function dismissHotspotQr() { root.dismissHotspotQr() }
     function speedTest() { root.summonSpeedTest() }
   }
 
   function activateHeader() {
-    if (headerIndex === qrHeaderIndex) summonWifiQr()
+    if (headerIndex === qrHeaderIndex) {
+      if (info.type === "wifi" && canShareNetwork(connectedWifiNetwork)) summonWifiQr()
+      else if (root.hotspotActive) summonHotspotQr()
+    }
     else if (headerIndex === speedHeaderIndex) summonSpeedTest()
     else if (headerIndex === hotspotHeaderIndex) toggleHotspot()
     else if (headerIndex === toggleHeaderIndex) toggleNetwork()
@@ -311,7 +322,7 @@ Panel {
         else cancelHotspotEdit()
       } else {
         if (hotspotActionIndex === 0) openHotspotEdit()
-        else if (hotspotActive) toggleHotspotQr()
+        else if (hotspotActive) summonHotspotQr()
       }
     }
   }
@@ -975,17 +986,37 @@ Panel {
     root.hotspotActionIndex = 0
   }
 
-  function toggleHotspotQr() {
-    if (root.hotspotShowingQr) {
-      root.hotspotShowingQr = false
-      return
-    }
-    root.hotspotShowingQr = true
+  function summonHotspotQr() {
+    root.close()
+    root.hotspotQrOpen = true
+    root.hotspotOverlayPasswordVisible = false
+    root.hotspotPasswordCopied = false
     root.generateHotspotQr()
+    Qt.callLater(function() {
+      if (root.hotspotQrOpen && hotspotKeyCatcher) {
+        hotspotKeyCatcher.forceActiveFocus()
+      }
+    })
+  }
+
+  function dismissHotspotQr() {
+    root.hotspotQrOpen = false
+    root.hotspotQrLoading = false
+    root.hotspotOverlayPasswordVisible = false
+    root.hotspotPasswordCopied = false
+    if (hotspotQrProc.running) {
+      hotspotQrProc.running = false
+    }
   }
 
   function generateHotspotQr() {
+    if (hotspotQrProc.running) {
+      hotspotQrProc.running = false
+    }
     root.hotspotQrLoading = true
+    root.hotspotQrError = ""
+    root.hotspotQrSize = 0
+    root.hotspotQrRows = []
     hotspotQrProc.command = [
       "bash", "-c", Model.hotspotQrScript, "hotspot-qr",
       root.hotspotSsid || "Omarchy-Hotspot",
@@ -996,8 +1027,7 @@ Panel {
 
   function copyHotspotPassword() {
     if (!root.hotspotPassword) return
-    copyProc.command = ["wl-copy", root.hotspotPassword]
-    copyProc.running = true
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(root.hotspotPassword) + " | wl-copy"])
     root.hotspotPasswordCopied = true
     hotspotCopiedTimer.restart()
   }
@@ -1280,7 +1310,17 @@ Panel {
 
   onHotspotActiveChanged: {
     if (!root.hotspotActive) {
-      root.hotspotShowingQr = false
+      root.dismissHotspotQr()
+    }
+  }
+
+  onHotspotQrOpenChanged: {
+    if (hotspotQrOpen) {
+      Qt.callLater(function() {
+        if (root.hotspotQrOpen && hotspotKeyCatcher) {
+          hotspotKeyCatcher.forceActiveFocus()
+        }
+      })
     }
   }
 
@@ -1293,12 +1333,26 @@ Panel {
         root.hotspotQrRows = parsed.rows
         root.hotspotQrSize = parsed.size
         root.hotspotQrLoading = false
+        if (root.hotspotQrSize === 0 && root.hotspotQrError === "") {
+          root.hotspotQrError = "Could not generate Wi-Fi QR code"
+        }
       }
     }
-  }
-
-  Process {
-    id: copyProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: function(text) {
+        var err = String(text || "").trim()
+        if (err !== "") root.hotspotQrError = err
+      }
+    }
+    onExited: function(exitCode) {
+      root.hotspotQrLoading = false
+      if (exitCode !== 0 || root.hotspotQrSize === 0) {
+        root.hotspotQrSize = 0
+        root.hotspotQrRows = []
+        if (root.hotspotQrError === "") root.hotspotQrError = "Could not generate Wi-Fi QR code"
+      }
+    }
   }
 
   Timer {
@@ -1575,11 +1629,7 @@ Panel {
         }
       }
       onCloseRequested: {
-        if (root.hotspotShowingQr) {
-          root.hotspotShowingQr = false
-        } else {
-          root.close()
-        }
+        root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
@@ -1627,7 +1677,9 @@ Panel {
             id: qrAction
             visible: root.canShareWifi
             iconText: "󰐲"
-            tooltipText: "Show QR code"
+            tooltipText: (info.type === "wifi" && canShareNetwork(connectedWifiNetwork))
+              ? "Show Wi-Fi QR code"
+              : (root.hotspotIsRepeater ? "Show Repeater QR code" : "Show Hotspot QR code")
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             iconSize: Style.font.subtitle * 1.5
@@ -1636,7 +1688,13 @@ Panel {
             hasCursor: root.qrHeaderHasCursor
             Layout.alignment: Qt.AlignVCenter
             onHovered: function(on) { if (on) root.setHeaderCursor(root.qrHeaderIndex) }
-            onClicked: root.summonWifiQr()
+            onClicked: {
+              if (info.type === "wifi" && canShareNetwork(connectedWifiNetwork)) {
+                root.summonWifiQr()
+              } else if (root.hotspotActive) {
+                root.summonHotspotQr()
+              }
+            }
           }
 
           Button {
@@ -2194,11 +2252,11 @@ Panel {
               id: hotspotQrBtn
               visible: root.hotspotActive
               width: visible ? (parent.width - Style.space(6)) / 2 : 0
-              text: root.hotspotShowingQr ? "Hide QR" : "Share QR"
-              iconText: root.hotspotShowingQr ? "󰅖" : "󰐲"
-              tooltipText: root.hotspotShowingQr ? "Hide QR code" : "Show QR code to scan and connect"
+              text: "Share QR"
+              iconText: "󰐲"
+              tooltipText: root.hotspotIsRepeater ? "Show Repeater QR code" : "Show Hotspot QR code"
               fontSize: Style.font.bodySmall
-              foreground: root.hotspotShowingQr ? Color.accent : root.bar.foreground
+              foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               horizontalPadding: Style.spacing.controlPaddingX
               verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
@@ -2211,120 +2269,7 @@ Panel {
                 root.hotspotRow = 1
                 root.hotspotActionIndex = 1
               }
-              onClicked: root.toggleHotspotQr()
-            }
-          }
-
-          // QR Code Card for Wi-Fi Hotspot / Repeater
-          Rectangle {
-            id: hotspotQrCard
-            visible: root.hotspotShowingQr && root.hotspotActive
-            width: parent.width
-            implicitHeight: qrCardCol.implicitHeight + Style.space(20)
-            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
-            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3)
-            border.width: 1
-            radius: Style.cornerRadius
-
-            Column {
-              id: qrCardCol
-              anchors.centerIn: parent
-              width: parent.width - Style.space(24)
-              spacing: Style.space(8)
-
-              // Header of QR Card
-              Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Style.space(6)
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.hotspotIsRepeater ? "󰤨" : "󱛇"
-                  color: Color.accent
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: (root.hotspotIsRepeater ? "REPEATER" : "HOTSPOT") + " QR CODE"
-                  color: Color.accent
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                }
-              }
-
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "Scan with your phone to connect automatically"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                horizontalAlignment: Text.AlignHCenter
-              }
-
-              // The White Canvas containing the QR Matrix
-              Rectangle {
-                id: qrMatrixCanvas
-                readonly property int moduleSize: root.hotspotQrSize > 0
-                  ? Math.max(3, Math.floor(Style.space(160) / root.hotspotQrSize))
-                  : 0
-                visible: root.hotspotQrSize > 0 && !root.hotspotQrLoading
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: root.hotspotQrSize * moduleSize + Style.space(16)
-                height: width
-                color: "white"
-                radius: Style.cornerRadius
-
-                Grid {
-                  anchors.centerIn: parent
-                  columns: root.hotspotQrSize
-
-                  Repeater {
-                    model: root.hotspotQrSize * root.hotspotQrSize
-
-                    Rectangle {
-                      required property int index
-                      readonly property int matrixRow: Math.floor(index / root.hotspotQrSize)
-                      readonly property int matrixColumn: index % root.hotspotQrSize
-
-                      width: qrMatrixCanvas.moduleSize
-                      height: qrMatrixCanvas.moduleSize
-                      color: (root.hotspotQrRows.length > matrixRow && root.hotspotQrRows[matrixRow].charAt(matrixColumn) === "1")
-                        ? "#111111"
-                        : "white"
-                    }
-                  }
-                }
-              }
-
-              // Loading placeholder
-              Text {
-                visible: root.hotspotQrLoading
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "Generating QR code…"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              // Copy Password button row
-              Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Style.space(8)
-
-                Button {
-                  text: root.hotspotPasswordCopied ? "󰄬 Password Copied!" : "󰆏 Copy Password"
-                  fontSize: Style.font.caption
-                  foreground: root.hotspotPasswordCopied ? Color.accent : root.bar.foreground
-                  fontFamily: root.bar.fontFamily
-                  horizontalPadding: Style.space(10)
-                  verticalPadding: Style.space(4)
-                  bordered: true
-                  onClicked: root.copyHotspotPassword()
-                }
-              }
+              onClicked: root.summonHotspotQr()
             }
           }
         }
@@ -3455,5 +3400,196 @@ Panel {
     color: root.bar.foreground
     font.family: root.bar.fontFamily
     font.pixelSize: Style.font.bodySmall
+  }
+
+  // Centered Hotspot / Repeater QR share overlay modal on WlrLayer.Overlay.
+  // Floating crisp QR code, SSID title, "Scan to join this network",
+  // and password reveal & copy options. Esc or clicking the scrim dismisses it.
+  PanelWindow {
+    id: hotspotQrWindow
+    visible: root.hotspotQrOpen
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omarchy-hotspot-qr"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+
+    // Deep scrim backdrop: near-black regardless of theme for contrast
+    Rectangle {
+      anchors.fill: parent
+      color: Qt.rgba(0, 0, 0, 0.78)
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.dismissHotspotQr()
+      }
+    }
+
+    Item {
+      id: hotspotKeyCatcher
+      anchors.fill: parent
+      focus: true
+
+      Keys.onEscapePressed: root.dismissHotspotQr()
+
+      Item {
+        anchors.centerIn: parent
+        width: hotspotQrLayout.implicitWidth
+        height: hotspotQrLayout.implicitHeight
+        scale: Math.min(1,
+          (hotspotKeyCatcher.width - Style.space(32)) / Math.max(1, width),
+          (hotspotKeyCatcher.height - Style.space(32)) / Math.max(1, height))
+
+        // Swallow clicks inside the card so only the scrim outside dismisses
+        MouseArea {
+          anchors.fill: parent
+          onClicked: {}
+        }
+
+        ColumnLayout {
+          id: hotspotQrLayout
+          anchors.fill: parent
+          spacing: Style.space(16)
+
+          Text {
+            textFormat: Text.PlainText
+            text: (root.hotspotSsid || (root.hotspotIsRepeater ? "Repeater" : "Hotspot")).toUpperCase()
+            color: Qt.rgba(1, 1, 1, 0.55)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 2
+            elide: Text.ElideRight
+            Layout.maximumWidth: Style.space(320)
+            Layout.alignment: Qt.AlignHCenter
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          // Render every QR module as an integer-sized native rectangle
+          Rectangle {
+            id: hotspotQrCanvas
+            readonly property int moduleSize: root.hotspotQrSize > 0
+              ? Math.max(4, Math.floor(Style.space(240) / root.hotspotQrSize))
+              : 0
+
+            visible: root.hotspotQrShowingCode
+            width: root.hotspotQrSize * moduleSize
+            height: width
+            color: "white"
+            radius: Style.cornerRadius
+            Layout.alignment: Qt.AlignHCenter
+
+            Grid {
+              anchors.fill: parent
+              columns: root.hotspotQrSize
+
+              Repeater {
+                model: root.hotspotQrSize * root.hotspotQrSize
+
+                Rectangle {
+                  required property int index
+                  readonly property int matrixRow: Math.floor(index / root.hotspotQrSize)
+                  readonly property int matrixColumn: index % root.hotspotQrSize
+
+                  width: hotspotQrCanvas.moduleSize
+                  height: hotspotQrCanvas.moduleSize
+                  color: (root.hotspotQrRows.length > matrixRow && root.hotspotQrRows[matrixRow].charAt(matrixColumn) === "1")
+                    ? "#111111"
+                    : "transparent"
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.hotspotQrLoading
+            text: "Generating QR code…"
+            color: Qt.rgba(1, 1, 1, 0.55)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: !root.hotspotQrLoading && root.hotspotQrError !== ""
+            text: root.hotspotQrError
+            color: "#ff6b6b"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+            Layout.fillWidth: true
+            Layout.maximumWidth: Style.space(320)
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Text {
+            visible: root.hotspotQrShowingCode
+            text: root.hotspotIsRepeater ? "Scan to join repeater network" : "Scan to join this network"
+            color: Qt.rgba(1, 1, 1, 0.55)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          // Password reveal & copy row
+          RowLayout {
+            visible: root.hotspotQrShowingCode && root.hotspotPassword !== ""
+            Layout.alignment: Qt.AlignHCenter
+            spacing: Style.space(12)
+
+            Text {
+              textFormat: Text.PlainText
+              text: root.hotspotOverlayPasswordVisible ? root.hotspotPassword : "Show password"
+              color: "white"
+              opacity: root.hotspotOverlayPasswordVisible ? 0.95 : 0.6
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.hotspotOverlayPasswordVisible = !root.hotspotOverlayPasswordVisible
+              }
+            }
+
+            Text {
+              text: "•"
+              color: Qt.rgba(1, 1, 1, 0.3)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              text: root.hotspotPasswordCopied ? "󰄬 Copied!" : "󰆏 Copy"
+              color: root.hotspotPasswordCopied ? Color.accent : Qt.rgba(1, 1, 1, 0.75)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: root.hotspotPasswordCopied
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.copyHotspotPassword()
+              }
+            }
+          }
+
+          Text {
+            visible: root.hotspotQrShowingCode && root.hotspotPassword === ""
+            text: "Open network (no password)"
+            color: Qt.rgba(1, 1, 1, 0.55)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            Layout.alignment: Qt.AlignHCenter
+            horizontalAlignment: Text.AlignHCenter
+          }
+        }
+      }
+    }
   }
 }

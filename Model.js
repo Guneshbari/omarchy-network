@@ -562,7 +562,7 @@ var hotspotQrScript =
   'else ' +
   '  payload="WIFI:T:nopass;S:$(escape_wifi_qr "$ssid");;"; ' +
   'fi; ' +
-  'ascii=$(printf "%s" "$payload" | qrencode --type ASCII --margin 2 --output - 2>/dev/null); ' +
+  'ascii=$(printf "%s" "$payload" | qrencode --type ASCII --margin 4 --output - 2>/dev/null); ' +
   'while IFS= read -r line; do ' +
   '  row=""; ' +
   '  for ((column = 0; column < ${#line}; column += 2)); do ' +
