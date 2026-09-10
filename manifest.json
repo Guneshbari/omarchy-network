@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "community.network",
-  "name": "Network Manager",
-  "version": "1.0.0",
+  "name": "Network Manager (with Repeater & Hotspot)",
+  "version": "1.1.0",
   "author": "Gunesh Bari",
   "license": "MIT",
-  "description": "Network status and manager for Omarchy with Wi-Fi, Hotspot AP management, DNS selection, and full interactive Wired Ethernet configuration (DHCP & Static IP) with keyboard navigation.",
+  "description": "Complete network manager for Omarchy featuring Wi-Fi, simultaneous Wi-Fi Repeater chaining & Hotspot AP with centered QR sharing, 1-click linux-wifi-hotspot installer, DNS selection, and interactive Wired Ethernet configuration (DHCP & Static IP) with full keyboard navigation.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Network",
-    "description": "Network status, Wi-Fi, Hotspot, wired Ethernet, and DNS",
+    "description": "Network status, Wi-Fi, Repeater, Hotspot, wired Ethernet, and DNS",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"

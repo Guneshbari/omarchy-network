@@ -1,45 +1,67 @@
-# Network Manager for Omarchy
+# Network Manager with Wi-Fi Repeater & Hotspot for Omarchy
 
-An enhanced Network bar widget and popup panel for the Omarchy Linux desktop shell. Features full Wi-Fi scanning and connection management, DNS provider selection, and an interactive **Wired Ethernet IPv4 configuration interface** with complete keyboard navigation and floating `nmtui` integration.
+An enhanced, keyboard-driven Network bar widget and popup control center for the [Omarchy](https://omarchy.org/) Linux desktop shell. Features simultaneous **Wi-Fi Repeater chaining**, standalone **Hotspot AP** with centered **QR code sharing**, 1-click **linux-wifi-hotspot installer**, interactive **Wired Ethernet IPv4 configuration** (DHCP & Static IP), and one-click **DNS provider selection**.
 
 ![Network Manager Preview](preview.png)
 
+<details>
+<summary><b>📸 See additional screenshots</b></summary>
+
+### Network Panel
+![Network Panel](screenshots/panel.png)
+
+### Centered Hotspot / Repeater QR Code Sharing
+![Hotspot QR Sharing Modal](screenshots/hotspot_qr.png)
+
+### Hotspot SSID, Password & Band Configuration
+![Hotspot Configuration](screenshots/hotspot_edit.png)
+
+</details>
+
 ---
 
-## Features
+## Highlights
 
-- 🌐 **Wi-Fi Management**: Scan, connect, disconnect, and enter passphrases for known and nearby networks.
-- 📡 **Wi-Fi Hotspot & Repeater (Network Chaining)**:
-  - **Simultaneous Wi-Fi Chaining**: When connected to Wi-Fi, turn on the hotspot as a repeater (`create_ap`) without disconnecting from your active Wi-Fi connection.
-  - One-click toggle switch to create and broadcast an instant Wi-Fi access point or repeater.
-  - Fully customizable **SSID** and **WPA2 Passphrase** with inline Show/Hide password toggle.
-  - Smart regulatory domain & channel pre-flight checks (notifies if your wireless card's firmware restricts 5 GHz AP initiation).
-  - Band switching between **2.4 GHz** (maximum device compatibility) and **5 GHz** (high speed).
-  - Real-time **connected client counter** and quick **Share QR Code** generation.
-- 🔌 **Wired Connection GUI**:
-  - Real-time Ethernet interface and profile detection (`nmcli`).
-  - Switch between **`<Automatic>` (DHCP)** and **`<Manual>` (Static IP)** with a single click or keystroke.
-  - Interactive manual IPv4 form fields for **Addresses** (CIDR), **Gateway**, and **DNS servers**.
-  - Direct validation, dirty tracking, and instant Apply/Cancel buttons.
+- 📡 **Simultaneous Wi-Fi Repeater (Network Chaining)**:
+  - Keep your active Wi-Fi connection alive while simultaneously creating and broadcasting a secondary access point to share your network with other devices.
+  - Powered by `create_ap` (`linux-wifi-hotspot`) for dual-interface virtual AP chaining.
+- ⚡ **1-Click Repeater Backend Installer**:
+  - If `linux-wifi-hotspot` is not yet installed on your system, the panel automatically shows an **"Install Repeater"** button.
+  - Clicking it immediately launches Omarchy's presented terminal to cleanly install `linux-wifi-hotspot` from the AUR—no manual command typing required.
+- 🌐 **Standalone Wi-Fi Hotspot AP**:
+  - Broadcast an independent access point via NetworkManager when offline or on Ethernet.
+  - Real-time **connected client counter** (`iw station dump`).
+  - Pre-flight regulatory checks warning you if your card firmware restricts 5 GHz AP initiation (no-IR).
+- 📲 **Centered QR Code Sharing Modal**:
+  - Crisp, scannable QR code overlay with deep scrim backdrop on `WlrLayer.Overlay`.
+  - Convenient inline **Show/Hide password** reveal and one-click **Copy Password** action.
+  - Seamlessly routes from both the main panel action button and the top hero QR action.
+- 🔌 **Wired Ethernet IPv4 Configuration**:
+  - Real-time Ethernet interface and profile detection via `nmcli`.
+  - Instant toggle between **`<Automatic>` (DHCP)** and **`<Manual>` (Static IP)**.
+  - Interactive form fields for **Addresses** (CIDR), **Gateway**, and **DNS servers**.
+  - Form validation, dirty tracking, and instant Apply/Cancel buttons.
+  - Direct hotkey `n` or `N` to open `nmtui` in a floating centered terminal window.
+- 🛡️ **DNS Switching**:
+  - Switch system DNS in one click between **DHCP**, **Cloudflare**, **Google**, or **Custom**.
+- 📊 **Real-time Transfer & Diagnostic Metrics**:
+  - Live throughput tracking (KB/s, MB/s delta calculations).
+  - Continuous ping latency & packet loss stats to router and internet.
 - ⌨️ **Full Keyboard Accessibility**:
-  - Seamless navigation with Arrow keys or Vim keys (`h`/`j`/`k`/`l`).
-  - Tab and Shift+Tab navigation through manual input fields.
-  - Quick hotkey `n` or `N` to open `nmtui` in a centered floating terminal window.
-  - Visual cursor focus outlines matching Omarchy's design language.
-- 🛡️ **DNS Switching**: One-click switching between DHCP, Cloudflare, Google, and Custom DNS.
-- 🚀 **Speed Test & Sharing**: Integrated speed test and Wi-Fi QR code sharing overlays.
+  - Navigate every row and button with Arrow keys or Vim keys (`h`/`j`/`k`/`l`).
+  - Focus outlines matching Omarchy's active theme.
 
 ---
 
 ## Installation
 
-You can install and enable this plugin with the Omarchy plugin CLI:
+Install and enable the plugin using the Omarchy plugin CLI:
 
 ```bash
-omarchy plugin add https://github.com/guneshbari/omarchy-network --enable
+omarchy plugin add https://github.com/Guneshbari/omarchy-network.git --enable
 ```
 
-To replace the default network widget in your status bar, update `~/.config/omarchy/shell.json`:
+To place this widget on your Omarchy status bar, ensure it is configured in `~/.config/omarchy/shell.json`:
 
 ```json
 {
@@ -53,11 +75,42 @@ To replace the default network widget in your status bar, update `~/.config/omar
 }
 ```
 
-Then reload your shell:
+Then reload the shell:
 
 ```bash
 omarchy restart shell
 ```
+
+---
+
+## Keyboard Navigation
+
+| Key(s) | Context | Action |
+|---|---|---|
+| `Down` / `j` | Header / Panel | Move focus to next section or row |
+| `Up` / `k` | Header / Panel | Move focus to previous section or row |
+| `Left` / `Right` or `h` / `l` | Buttons | Switch between pills or action buttons |
+| `Enter` / `Space` | Buttons | Activate highlighted button or toggle |
+| `Tab` / `Down` | Form Fields | Move to next input field or action button |
+| `Shift+Tab` / `Up` | Form Fields | Return to previous field or method row |
+| `Escape` | Form Fields / QR Modal | Dismiss modal or cancel form editing |
+| `n` / `N` | Panel | Launch `nmtui` in a floating terminal |
+| `h` / `H` | Panel | Toggle Wi-Fi Hotspot / Repeater on or off |
+| `r` / `R` | Panel | Refresh network status and scan Wi-Fi |
+| `w` / `W` | Panel | Toggle Wi-Fi radio on or off |
+
+---
+
+## Dependencies
+
+| Package | Type | Purpose |
+|---|---|---|
+| `networkmanager` (`nmcli`) | **Required** | Core Wi-Fi scanning, connections, and standard AP |
+| `iw` | **Required** | Wi-Fi radio frequencies and connected client counting |
+| `jq` | **Required** | JSON query parsing |
+| `qrencode` | **Required** | High-contrast ASCII QR code generation |
+| `wl-clipboard` (`wl-copy`) | **Required** | Clipboard copying for passwords and IP addresses |
+| `linux-wifi-hotspot` | **Optional (`optdepends`)** | Enables simultaneous Wi-Fi repeater chaining while connected to Wi-Fi. *(Can be installed directly via the panel's 1-click button)* |
 
 ---
 
@@ -70,43 +123,10 @@ omarchy plugin disable community.network
 omarchy plugin remove community.network
 ```
 
-To restore the default network widget in your status bar, update `~/.config/omarchy/shell.json` to reference `"omarchy.network"` instead of `"community.network"`, then reload:
+To restore the default stock network widget, set `"omarchy.network"` in `~/.config/omarchy/shell.json` and reload:
 
 ```bash
 omarchy restart shell
-```
-
----
-
-## Keyboard Navigation Reference
-
-| Key(s) | Context | Action |
-|---|---|---|
-| `Down` / `j` | Header / Panel | Move focus to next section or row |
-| `Up` / `k` | Header / Panel | Move focus to previous section or row |
-| `Left` / `Right` or `h` / `l` | Buttons | Switch between pills or action buttons |
-| `Enter` / `Space` | Buttons | Activate selected button or toggle method |
-| `Tab` / `Down` | Input Fields | Advance to next field or action button |
-| `Shift+Tab` / `Up` | Input Fields | Return to previous field or method row |
-| `Escape` | Input Fields | Exit field editing and return cursor to `<Manual>` |
-| `n` / `N` | Panel (unfocused) | Launch `nmtui` in a floating terminal |
-| `h` / `H` | Panel (unfocused) | Toggle Wi-Fi Hotspot on/off |
-| `r` / `R` | Panel (unfocused) | Refresh network list and connection status |
-| `w` / `W` | Panel (unfocused) | Toggle Wi-Fi radio on/off |
-
----
-
-## Dependencies
- 
- - **NetworkManager** (`nmcli`)
- - **Omarchy Shell** (`quickshell`)
- - **Hyprland**
- - *(Optional for Wi-Fi Repeater)*: **linux-wifi-hotspot** (`create_ap`) for simultaneous Wi-Fi chaining (`sudo pacman -S linux-wifi-hotspot`)
-
-To ensure `nmtui` always opens in a centered floating window, add this rule to your `~/.config/hypr/hyprland.lua`:
-
-```lua
-o.window("org.omarchy.nmtui", { tag = "+floating-window" })
 ```
 
 ---
