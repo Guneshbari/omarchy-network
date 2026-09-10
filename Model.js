@@ -546,8 +546,46 @@ var hotspotApplyScript =
   '  fi; ' +
   'fi'
 
+var hotspotQrScript =
+  'ssid="$1"; pwd="$2"; ' +
+  'if [[ -z "$ssid" ]]; then ssid="Omarchy-Hotspot"; fi; ' +
+  'escape_wifi_qr() { ' +
+  '  local value=$1; ' +
+  '  value=${value//\\\\/\\\\\\\\}; ' +
+  '  value=${value//;/\\\\;}; ' +
+  '  value=${value//,/\\\\,}; ' +
+  '  value=${value//:/\\\\:}; ' +
+  '  printf "%s" "$value"; ' +
+  '}; ' +
+  'if [[ -n "$pwd" ]]; then ' +
+  '  payload="WIFI:T:WPA;S:$(escape_wifi_qr "$ssid");P:$(escape_wifi_qr "$pwd");;"; ' +
+  'else ' +
+  '  payload="WIFI:T:nopass;S:$(escape_wifi_qr "$ssid");;"; ' +
+  'fi; ' +
+  'ascii=$(printf "%s" "$payload" | qrencode --type ASCII --margin 2 --output - 2>/dev/null); ' +
+  'while IFS= read -r line; do ' +
+  '  row=""; ' +
+  '  for ((column = 0; column < ${#line}; column += 2)); do ' +
+  '    [[ ${line:column:2} == *#* ]] && row+=1 || row+=0; ' +
+  '  done; ' +
+  '  printf "%s\\n" "$row"; ' +
+  'done <<<"$ascii"'
+
+function parseQrMatrix(raw) {
+  var lines = String(raw || "").trim().split(/\r?\n/).filter(function(line) { return line !== "" })
+  if (lines.length === 0) return { rows: [], size: 0 }
+  var size = lines[0].length
+  if (size !== lines.length) return { rows: [], size: 0 }
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].length !== size || !/^[01]+$/.test(lines[i])) return { rows: [], size: 0 }
+  }
+  return { rows: lines, size: size }
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    hotspotQrScript: hotspotQrScript,
+    parseQrMatrix: parseQrMatrix,
     parseNetworkStatus: parseNetworkStatus,
     wifiIconFor: wifiIconFor,
     connectionIcon: connectionIcon,
