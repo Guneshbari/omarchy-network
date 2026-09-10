@@ -18,8 +18,5 @@
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"
-  },
-  "omarchy": {
-    "clonedFrom": "omarchy.network"
   }
 }
