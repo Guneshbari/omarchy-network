@@ -324,6 +324,7 @@ Panel {
       } else {
         if (hotspotActionIndex === 0) openHotspotEdit()
         else if (hotspotActive) summonHotspotQr()
+        else if (!hotspotHasCreateAp) installLinuxWifiHotspot()
       }
     }
   }
@@ -985,6 +986,23 @@ Panel {
     root.hotspotStatusIsError = false
     root.hotspotRow = 0
     root.hotspotActionIndex = 0
+  }
+
+  function installLinuxWifiHotspot() {
+    root.close()
+    var cmd = "if pacman -Q linux-wifi-hotspot >/dev/null 2>&1; then " +
+              "  yay -S --needed --cleanafter linux-wifi-hotspot; " +
+              "elif command -v omarchy >/dev/null 2>&1; then " +
+              "  omarchy pkg aur add linux-wifi-hotspot || yay -S --needed linux-wifi-hotspot; " +
+              "else " +
+              "  yay -S --needed linux-wifi-hotspot; " +
+              "fi"
+    var launcher = "omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(cmd)
+    if (root.bar && typeof root.bar.run === "function") {
+      root.bar.run(launcher)
+    } else {
+      Quickshell.execDetached(["bash", "-c", launcher])
+    }
   }
 
   function summonHotspotQr() {
@@ -2127,13 +2145,13 @@ Panel {
             }
             if (root.hotspotWifiConnected) {
               if (!root.hotspotHasCreateAp) {
-                return "󰤮 Install linux-wifi-hotspot for simultaneous Wi-Fi repeater"
+                return "󰤮 Simultaneous Wi-Fi repeater requires linux-wifi-hotspot"
               }
               return root.hotspotRepeaterCapable
                 ? "󰤨 Repeater ready · Shares active Wi-Fi without disconnecting"
                 : "󰤩 5GHz channel restricted (no-IR) · Connect to 2.4GHz Wi-Fi to repeat"
             }
-            return "Standard Wi-Fi Access Point"
+            return root.hotspotHasCreateAp ? "Standard Wi-Fi Access Point" : "Standard Wi-Fi AP (Install linux-wifi-hotspot for repeater)"
           }
           color: Qt.darker(root.bar.foreground, 1.4)
           font.family: root.bar.fontFamily
@@ -2230,14 +2248,14 @@ Panel {
             }
           }
 
-          // Action Buttons: [Edit Settings] and optionally [Share QR Code]
+          // Action Buttons: [Edit Settings] and [Share QR Code] / [Install Repeater]
           Row {
             width: parent.width
             spacing: Style.space(6)
 
             Button {
               id: hotspotEditBtn
-              width: root.hotspotActive ? (parent.width - Style.space(6)) / 2 : parent.width
+              width: (root.hotspotActive || !root.hotspotHasCreateAp) ? (parent.width - Style.space(6)) / 2 : parent.width
               text: "Edit Settings"
               iconText: "󰏫"
               tooltipText: "Configure Hotspot SSID, Password, and Band"
@@ -2280,6 +2298,30 @@ Panel {
                 root.hotspotActionIndex = 1
               }
               onClicked: root.summonHotspotQr()
+            }
+
+            Button {
+              id: hotspotInstallBtn
+              visible: !root.hotspotActive && !root.hotspotHasCreateAp
+              width: visible ? (parent.width - Style.space(6)) / 2 : 0
+              text: "Install Repeater"
+              iconText: "󰏔"
+              tooltipText: "Install linux-wifi-hotspot from AUR for Wi-Fi repeater chaining"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 1 && root.hotspotActionIndex === 1
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 1
+              }
+              onClicked: root.installLinuxWifiHotspot()
             }
           }
         }
