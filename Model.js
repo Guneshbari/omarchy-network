@@ -385,6 +385,63 @@ var wiredApplyScript =
   '  nmcli connection up "$con" 2>/dev/null || true; ' +
   'fi'
 
+var hotspotQueryScript =
+  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
+  'has_ap="false"; ' +
+  'if [[ -n "$dev" ]] && iw list 2>/dev/null | grep -A 8 "Supported interface modes" | grep -q "AP"; then has_ap="true"; fi; ' +
+  'con=""; ' +
+  'for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
+  '  mode=$(nmcli -g 802-11-wireless.mode con show "$uuid" 2>/dev/null); ' +
+  '  if [[ "$mode" == "ap" ]]; then con=$(nmcli -g connection.id con show "$uuid" 2>/dev/null); break; fi; ' +
+  'done; ' +
+  'if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
+  'if nmcli connection show "$con" >/dev/null 2>&1; then ' +
+  '  ssid=$(nmcli -s -g 802-11-wireless.ssid connection show "$con" 2>/dev/null); ' +
+  '  pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show "$con" 2>/dev/null); ' +
+  '  band=$(nmcli -s -g 802-11-wireless.band connection show "$con" 2>/dev/null); ' +
+  '  is_act=$(nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep "^${con}:yes" || true); ' +
+  '  if [[ -n "$is_act" ]]; then active="true"; else active="false"; fi; ' +
+  'else ' +
+  '  ssid="Omarchy-Hotspot"; ' +
+  '  pwd="omarchy12345"; ' +
+  '  band="bg"; ' +
+  '  active="false"; ' +
+  'fi; ' +
+  'clients=0; ' +
+  'if [[ "$active" == "true" && -n "$dev" ]]; then ' +
+  '  clients=$(iw dev "$dev" station dump 2>/dev/null | grep -c "^Station " || echo 0); ' +
+  'fi; ' +
+  'jq -nc --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg pwd "${pwd:-omarchy12345}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson hasAp "$has_ap" ' +
+  '  \'{"name": $con, "ssid": $ssid, "password": $pwd, "band": $band, "active": $active, "device": $dev, "clients": $clients, "hasAp": $hasAp}\''
+
+var hotspotApplyScript =
+  'action="$1"; con="$2"; ssid="$3"; pwd="$4"; band="$5"; ' +
+  'if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
+  'if [[ -z "$ssid" ]]; then ssid="Omarchy-Hotspot"; fi; ' +
+  'if [[ -z "$pwd" ]]; then pwd="omarchy12345"; fi; ' +
+  'if [[ -z "$band" ]]; then band="bg"; fi; ' +
+  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
+  'if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
+  '  nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
+  '    802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
+  '    802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
+  '    ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
+  'else ' +
+  '  nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
+  '    802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
+  'fi; ' +
+  'if [[ "$action" == "start" ]]; then ' +
+  '  nmcli con up "$con" >/dev/null 2>&1; ' +
+  'elif [[ "$action" == "stop" ]]; then ' +
+  '  nmcli con down "$con" >/dev/null 2>&1; ' +
+  'elif [[ "$action" == "toggle" ]]; then ' +
+  '  if nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then ' +
+  '    nmcli con down "$con" >/dev/null 2>&1; ' +
+  '  else ' +
+  '    nmcli con up "$con" >/dev/null 2>&1; ' +
+  '  fi; ' +
+  'fi'
+
 if (typeof module !== "undefined") {
   module.exports = {
     parseNetworkStatus: parseNetworkStatus,
@@ -415,6 +472,8 @@ if (typeof module !== "undefined") {
     networkFailureReason: networkFailureReason,
     shouldRepromptPassphrase: shouldRepromptPassphrase,
     wiredQueryScript: wiredQueryScript,
-    wiredApplyScript: wiredApplyScript
+    wiredApplyScript: wiredApplyScript,
+    hotspotQueryScript: hotspotQueryScript,
+    hotspotApplyScript: hotspotApplyScript
   }
 }

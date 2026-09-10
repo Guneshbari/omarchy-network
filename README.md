@@ -9,6 +9,11 @@ An enhanced Network bar widget and popup panel for the Omarchy Linux desktop she
 ## Features
 
 - 🌐 **Wi-Fi Management**: Scan, connect, disconnect, and enter passphrases for known and nearby networks.
+- 📡 **Wi-Fi Hotspot (AP Mode)**:
+  - One-click toggle switch to create and broadcast an instant Wi-Fi access point.
+  - Fully customizable **SSID** and **WPA2 Passphrase** with inline Show/Hide password toggle.
+  - Band switching between **2.4 GHz** (maximum device compatibility) and **5 GHz** (high speed).
+  - Real-time **connected client counter** and quick **Share QR Code** generation.
 - 🔌 **Wired Connection GUI**:
   - Real-time Ethernet interface and profile detection (`nmcli`).
   - Switch between **`<Automatic>` (DHCP)** and **`<Manual>` (Static IP)** with a single click or keystroke.
@@ -83,6 +88,7 @@ omarchy restart shell
 | `Shift+Tab` / `Up` | Input Fields | Return to previous field or method row |
 | `Escape` | Input Fields | Exit field editing and return cursor to `<Manual>` |
 | `n` / `N` | Panel (unfocused) | Launch `nmtui` in a floating terminal |
+| `h` / `H` | Panel (unfocused) | Toggle Wi-Fi Hotspot on/off |
 | `r` / `R` | Panel (unfocused) | Refresh network list and connection status |
 | `w` / `W` | Panel (unfocused) | Toggle Wi-Fi radio on/off |
 

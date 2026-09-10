@@ -119,6 +119,27 @@ Panel {
   property int wiredRow: 0
   property int wiredActionIndex: 0
 
+  // Hotspot state
+  property bool hasHotspotSupport: true
+  property string hotspotName: "Hotspot"
+  property string hotspotSsid: "Omarchy-Hotspot"
+  property string hotspotPassword: ""
+  property string hotspotBand: "bg"
+  property bool hotspotActive: false
+  property string hotspotDevice: ""
+  property int hotspotClients: 0
+  property bool hotspotBusy: false
+  property bool hotspotPasswordVisible: false
+  property bool hotspotEditing: false
+  property string hotspotDraftSsid: ""
+  property string hotspotDraftPassword: ""
+  property string hotspotDraftBand: "bg"
+  property string hotspotStatusMsg: ""
+  property bool hotspotStatusIsError: false
+  property bool hotspotInputFocused: false
+  property int hotspotRow: 0
+  property int hotspotActionIndex: 0
+
   // ConnectionFailReason values as a plain object, so Model.js helpers stay
   // pure JS and Node-testable.
   readonly property var connectionFailReasons: ({
@@ -140,9 +161,8 @@ Panel {
   property bool cursorActive: false
 
   // Keyboard focus zone for the panel. j/k crosses row boundaries:
-  // header actions ⇄ band ⇄ DNS row ⇄ Wi-Fi networks. h/l move
-  // within header actions, band pills, or DNS providers.
-  property string focusSection: "dns"  // "header" | "band" | "dns" | "wifi"
+  // header actions ⇄ band ⇄ hotspot ⇄ wired ⇄ DNS row ⇄ Wi-Fi networks.
+  property string focusSection: "dns"  // "header" | "band" | "hotspot" | "wired" | "dns" | "wifi"
   property int headerIndex: 0
   readonly property bool canDisconnect: !!connectedWifiNetwork
   readonly property bool headerHasDisconnect: false
@@ -153,10 +173,12 @@ Panel {
   readonly property bool canToggleWifi: networkManagerAvailable && wifiStationAvailable
   readonly property int qrHeaderIndex: canShareWifi ? 0 : -1
   readonly property int speedHeaderIndex: canRunSpeedTest ? (canShareWifi ? 1 : 0) : -1
-  readonly property int toggleHeaderIndex: canToggleWifi ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) : -1
-  readonly property int headerActionCount: (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (canToggleWifi ? 1 : 0)
+  readonly property int hotspotHeaderIndex: hasHotspotSupport ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) : -1
+  readonly property int toggleHeaderIndex: canToggleWifi ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) : -1
+  readonly property int headerActionCount: (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) + (canToggleWifi ? 1 : 0)
   readonly property bool qrHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === qrHeaderIndex
   readonly property bool speedHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === speedHeaderIndex
+  readonly property bool hotspotHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === hotspotHeaderIndex
   readonly property bool toggleHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === toggleHeaderIndex
   readonly property string toggleHint: Networking.wifiEnabled ? "Turn Wi-Fi off" : "Turn Wi-Fi on"
   readonly property var dnsProviders: ["DHCP", "Cloudflare", "Google", "Custom"]
@@ -259,7 +281,30 @@ Panel {
   function activateHeader() {
     if (headerIndex === qrHeaderIndex) summonWifiQr()
     else if (headerIndex === speedHeaderIndex) summonSpeedTest()
+    else if (headerIndex === hotspotHeaderIndex) toggleHotspot()
     else if (headerIndex === toggleHeaderIndex) toggleNetwork()
+  }
+
+  function selectHotspotByDelta(delta) {
+    if (hotspotRow === 0) {
+      return
+    } else {
+      hotspotActionIndex = Math.max(0, Math.min(1, hotspotActionIndex + delta))
+    }
+  }
+
+  function activateHotspot() {
+    if (hotspotRow === 0) {
+      toggleHotspot()
+    } else {
+      if (hotspotEditing) {
+        if (hotspotActionIndex === 0) saveHotspot()
+        else cancelHotspotEdit()
+      } else {
+        if (hotspotActionIndex === 0) openHotspotEdit()
+        else if (hotspotActive) summonWifiQr()
+      }
+    }
   }
 
   function setHeaderCursor(index) {
@@ -548,6 +593,7 @@ Panel {
       bandProc.running = true
     }
     root.refreshWired()
+    root.refreshHotspot()
     // A closed panel has no nearby-network list to fill, and bare refresh()
     // reaches here from action completion, timeouts and construction.
     if (opened && wifiDevice) {
@@ -813,6 +859,95 @@ Panel {
     root.close()
   }
 
+  function updateHotspot(raw) {
+    try {
+      var data = JSON.parse(raw.trim())
+      if (data) {
+        root.hasHotspotSupport = !!data.hasAp
+        root.hotspotName = data.name || "Hotspot"
+        root.hotspotSsid = data.ssid || "Omarchy-Hotspot"
+        root.hotspotPassword = data.password || ""
+        root.hotspotBand = data.band || "bg"
+        root.hotspotActive = !!data.active
+        root.hotspotDevice = data.device || ""
+        root.hotspotClients = data.clients || 0
+        if (!root.hotspotEditing) {
+          root.hotspotDraftSsid = root.hotspotSsid
+          root.hotspotDraftPassword = root.hotspotPassword
+          root.hotspotDraftBand = root.hotspotBand
+        }
+      }
+    } catch (e) {}
+  }
+
+  function refreshHotspot() {
+    if (!hotspotProc.running) {
+      hotspotProc.command = ["bash", "-c", Model.hotspotQueryScript]
+      hotspotProc.running = true
+    }
+  }
+
+  function toggleHotspot() {
+    if (root.hotspotBusy) return
+    root.hotspotBusy = true
+    root.hotspotStatusMsg = root.hotspotActive ? "Stopping hotspot..." : "Starting hotspot..."
+    root.hotspotStatusIsError = false
+    hotspotApplyProc.command = [
+      "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
+      "toggle",
+      root.hotspotName || "Hotspot",
+      root.hotspotSsid || "Omarchy-Hotspot",
+      root.hotspotPassword || "omarchy12345",
+      root.hotspotBand || "bg"
+    ]
+    hotspotApplyProc.running = true
+  }
+
+  function saveHotspot() {
+    if (root.hotspotBusy) return
+    if (!root.hotspotDraftSsid) {
+      root.hotspotStatusMsg = "SSID cannot be empty"
+      root.hotspotStatusIsError = true
+      return
+    }
+    if (root.hotspotDraftPassword.length < 8) {
+      root.hotspotStatusMsg = "Password must be at least 8 characters"
+      root.hotspotStatusIsError = true
+      return
+    }
+    root.hotspotBusy = true
+    root.hotspotStatusMsg = "Saving..."
+    root.hotspotStatusIsError = false
+    hotspotApplyProc.command = [
+      "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
+      "save",
+      root.hotspotName || "Hotspot",
+      root.hotspotDraftSsid,
+      root.hotspotDraftPassword,
+      root.hotspotDraftBand
+    ]
+    hotspotApplyProc.running = true
+  }
+
+  function openHotspotEdit() {
+    root.hotspotDraftSsid = root.hotspotSsid
+    root.hotspotDraftPassword = root.hotspotPassword
+    root.hotspotDraftBand = root.hotspotBand
+    root.hotspotEditing = true
+    root.hotspotStatusMsg = ""
+    root.hotspotStatusIsError = false
+    root.hotspotRow = 1
+    root.hotspotActionIndex = 0
+  }
+
+  function cancelHotspotEdit() {
+    root.hotspotEditing = false
+    root.hotspotStatusMsg = ""
+    root.hotspotStatusIsError = false
+    root.hotspotRow = 0
+    root.hotspotActionIndex = 0
+  }
+
   function requiresCredentials(security) {
     return Model.requiresCredentials(security, WifiSecurityType.Open, WifiSecurityType.Owe)
   }
@@ -1054,6 +1189,41 @@ Panel {
     }
   }
 
+  Process {
+    id: hotspotProc
+    command: ["bash", "-c", Model.hotspotQueryScript]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.updateHotspot(text)
+    }
+  }
+
+  Process {
+    id: hotspotApplyProc
+    stdout: StdioCollector {
+      id: hotspotApplyOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: hotspotApplyErr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.hotspotBusy = false
+      if (exitCode === 0) {
+        root.hotspotEditing = false
+        root.hotspotStatusMsg = ""
+        root.hotspotStatusIsError = false
+        root.refreshHotspot()
+        root.refresh()
+      } else {
+        root.hotspotStatusMsg = hotspotApplyErr.text ? hotspotApplyErr.text.trim() : "Failed to execute"
+        root.hotspotStatusIsError = true
+        root.refreshHotspot()
+      }
+    }
+  }
+
   // Poll details while the panel is open so the IP/route header catches up
   // as soon as NetworkManager finishes activating a connection.
   Timer {
@@ -1159,7 +1329,7 @@ Panel {
       anchors.fill: parent
       // Freeze the cursor model while the inline password prompt is open;
       // the TextField inside owns input until Esc/Enter/Cancel.
-      blocked: root.passwordSsid !== "" || root.wiredInputFocused
+      blocked: root.passwordSsid !== "" || root.wiredInputFocused || root.hotspotInputFocused
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) {
@@ -1167,12 +1337,15 @@ Panel {
           if (dy >= 0) return
         }
         if (dy !== 0) {
-          // Vertical order is header ⇄ band ⇄ wired ⇄ DNS ⇄ wifi
+          // Vertical order is header ⇄ band ⇄ hotspot ⇄ wired ⇄ DNS ⇄ wifi
           if (root.focusSection === "header") {
             if (dy > 0) {
               if (root.canSelectBand) {
                 root.focusSection = "band"
                 root.bandAutoFocused = true
+              } else if (root.hasHotspotSupport) {
+                root.focusSection = "hotspot"
+                root.hotspotRow = 0
               } else if (root.hasWired) {
                 root.focusSection = "wired"
                 root.wiredRow = 0
@@ -1190,11 +1363,36 @@ Panel {
               }
             } else if (root.bandAutoFocused && root.bandPillsVisible) {
               root.bandAutoFocused = false
+            } else if (root.hasHotspotSupport) {
+              root.focusSection = "hotspot"
+              root.hotspotRow = 0
             } else if (root.hasWired) {
               root.focusSection = "wired"
               root.wiredRow = 0
             } else {
               root.focusSection = "dns"
+            }
+          } else if (root.focusSection === "hotspot") {
+            if (dy < 0) {
+              if (root.hotspotRow === 1) {
+                root.hotspotRow = 0
+              } else if (root.canSelectBand) {
+                root.focusSection = "band"
+                root.bandAutoFocused = !root.bandPillsVisible
+              } else if (root.headerActionCount > 0) {
+                root.focusSection = "header"
+                root.headerIndex = 0
+              }
+            } else {
+              if (root.hotspotRow === 0) {
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 0
+              } else if (root.hasWired) {
+                root.focusSection = "wired"
+                root.wiredRow = 0
+              } else {
+                root.focusSection = "dns"
+              }
             }
           } else if (root.focusSection === "wired") {
             if (dy < 0) {
@@ -1208,7 +1406,11 @@ Panel {
               } else if (root.wiredRow === 1) {
                 root.wiredRow = 0
               } else {
-                if (root.canSelectBand) {
+                if (root.hasHotspotSupport) {
+                  root.focusSection = "hotspot"
+                  root.hotspotRow = 1
+                  root.hotspotActionIndex = 0
+                } else if (root.canSelectBand) {
                   root.focusSection = "band"
                   root.bandAutoFocused = !root.bandPillsVisible
                 } else if (root.headerActionCount > 0) {
@@ -1244,6 +1446,10 @@ Panel {
                   root.wiredRow = 1
                   root.wiredIndex = 0
                 }
+              } else if (root.hasHotspotSupport) {
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 0
               } else if (root.canSelectBand) {
                 root.focusSection = "band"
                 root.bandAutoFocused = !root.bandPillsVisible
@@ -1266,6 +1472,7 @@ Panel {
         if (dx !== 0) {
           if (root.focusSection === "header") root.selectHeaderByDelta(dx)
           else if (root.focusSection === "band") { if (!root.bandAutoFocused) root.selectBandByDelta(dx) }
+          else if (root.focusSection === "hotspot") root.selectHotspotByDelta(dx)
           else if (root.focusSection === "wired") root.selectWiredByDelta(dx)
           else if (root.focusSection === "dns") root.selectDnsByDelta(dx)
           else if (root.focusSection === "wifi") root.selectWifiActionByDelta(dx)
@@ -1275,6 +1482,7 @@ Panel {
         if (root.cursorActive) {
           if (root.focusSection === "header") root.activateHeader()
           else if (root.focusSection === "band") root.activateBand()
+          else if (root.focusSection === "hotspot") root.activateHotspot()
           else if (root.focusSection === "wired") root.activateWired()
           else if (root.focusSection === "dns") root.activateDns()
           else root.activateSelected()
@@ -1286,7 +1494,9 @@ Panel {
         if (t === "r" || t === "R") root.refresh()
         else if (t === "w" || t === "W") root.toggleNetwork()
         else if (t === "n" || t === "N") root.openNmtui()
+        else if (t === "h" || t === "H") root.toggleHotspot()
       }
+    }
 
     Column {
       id: column
@@ -1351,6 +1561,24 @@ Panel {
             Layout.alignment: Qt.AlignVCenter
             onHovered: function(on) { if (on) root.setHeaderCursor(root.speedHeaderIndex) }
             onClicked: root.summonSpeedTest()
+          }
+
+          Button {
+            id: hotspotAction
+            visible: root.hasHotspotSupport
+            iconText: "󱛇"
+            tooltipText: root.hotspotActive
+              ? "Hotspot Active (" + root.hotspotClients + " connected) - Click to Stop"
+              : "Start Wi-Fi Hotspot"
+            foreground: root.hotspotActive ? root.bar.accent : root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            iconSize: Style.font.subtitle * 1.5
+            horizontalPadding: Style.space(5)
+            verticalPadding: Style.space(2)
+            hasCursor: root.hotspotHeaderHasCursor
+            Layout.alignment: Qt.AlignVCenter
+            onHovered: function(on) { if (on) root.setHeaderCursor(root.hotspotHeaderIndex) }
+            onClicked: root.toggleHotspot()
           }
 
           ToggleSwitch {
@@ -1609,6 +1837,414 @@ Panel {
           }
         }
 
+      // Wi-Fi Hotspot
+      PanelSeparator {
+        visible: root.hasHotspotSupport
+        foreground: root.bar.foreground
+      }
+
+      Column {
+        id: hotspotSection
+        visible: root.hasHotspotSupport
+        width: parent.width
+        spacing: Style.space(8)
+
+        // Header line: Section title + Active/Inactive Badge + Toggle Switch
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(hotspotHeader.implicitHeight, hotspotToggleRow.implicitHeight)
+
+          Row {
+            id: hotspotTitleRow
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              id: hotspotHeader
+              text: "WI-FI HOTSPOT"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Rectangle {
+              id: hotspotBadge
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.radius.full
+              color: root.hotspotActive ? Qt.rgba(root.bar.accent.r, root.bar.accent.g, root.bar.accent.b, 0.2) : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+              border.color: root.hotspotActive ? root.bar.accent : "transparent"
+              border.width: 1
+              implicitWidth: hotspotBadgeText.implicitWidth + Style.space(12)
+              implicitHeight: hotspotBadgeText.implicitHeight + Style.space(4)
+
+              Text {
+                id: hotspotBadgeText
+                anchors.centerIn: parent
+                text: root.hotspotActive
+                  ? (root.hotspotClients > 0 ? "ACTIVE (" + root.hotspotClients + ")" : "ACTIVE")
+                  : "INACTIVE"
+                color: root.hotspotActive ? root.bar.accent : Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+            }
+          }
+
+          Row {
+            id: hotspotToggleRow
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+
+            ToggleSwitch {
+              id: hotspotSwitch
+              trackHeight: Math.round(hotspotHeader.font.pixelSize * 1.2)
+              cursorPad: Style.space(3)
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.hotspotActive
+              busy: root.hotspotBusy
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 0
+              foreground: root.bar.foreground
+              onToggled: root.toggleHotspot()
+
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 0
+              }
+
+              PanelToolTip {
+                visible: hotspotSwitch.containsMouse
+                text: root.hotspotActive ? "Stop Wi-Fi Hotspot" : "Start Wi-Fi Hotspot"
+                fontFamily: root.bar.fontFamily
+              }
+            }
+          }
+        }
+
+        // Status message if busy or error
+        Text {
+          text: root.hotspotStatusMsg
+          color: root.hotspotStatusIsError ? root.bar.urgent : root.bar.accent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          visible: text !== ""
+        }
+
+        // When NOT editing: Display Card
+        Column {
+          visible: !root.hotspotEditing
+          width: parent.width
+          spacing: Style.space(6)
+
+          // Info row: SSID and Password
+          Row {
+            width: parent.width
+            spacing: Style.space(10)
+
+            Column {
+              width: (parent.width - Style.space(10)) * 0.55
+              spacing: Style.space(2)
+
+              Text {
+                text: "SSID / NETWORK"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Text {
+                text: root.hotspotSsid
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+                elide: Text.ElideRight
+                width: parent.width
+              }
+            }
+
+            Column {
+              width: (parent.width - Style.space(10)) * 0.45
+              spacing: Style.space(2)
+
+              Text {
+                text: "PASSWORD (" + (root.hotspotBand === "a" ? "5GHz" : "2.4GHz") + ")"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                spacing: Style.space(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+
+                Text {
+                  id: hotspotPwdDisplay
+                  text: root.hotspotPasswordVisible ? root.hotspotPassword : "••••••••"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Button {
+                  id: hotspotPwdEyeBtn
+                  iconText: root.hotspotPasswordVisible ? "󰈈" : "󰈉"
+                  tooltipText: root.hotspotPasswordVisible ? "Hide password" : "Show password"
+                  fontSize: Style.font.caption
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(2)
+                  anchors.verticalCenter: parent.verticalCenter
+                  onClicked: root.hotspotPasswordVisible = !root.hotspotPasswordVisible
+                }
+              }
+            }
+          }
+
+          // Action Buttons: [Edit Settings] and optionally [Share QR Code]
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Button {
+              id: hotspotEditBtn
+              width: root.hotspotActive ? (parent.width - Style.space(6)) / 2 : parent.width
+              text: "Edit Settings"
+              iconText: "󰏫"
+              tooltipText: "Configure Hotspot SSID, Password, and Band"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 1 && root.hotspotActionIndex === 0
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 0
+              }
+              onClicked: root.openHotspotEdit()
+            }
+
+            Button {
+              id: hotspotQrBtn
+              visible: root.hotspotActive
+              width: visible ? (parent.width - Style.space(6)) / 2 : 0
+              text: "Share QR"
+              iconText: "󰐲"
+              tooltipText: "Show QR code to scan and connect"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 1 && root.hotspotActionIndex === 1
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 1
+              }
+              onClicked: root.summonWifiQr()
+            }
+          }
+        }
+
+        // When EDITING: Form Fields + Save/Cancel Buttons
+        Column {
+          id: hotspotEditFields
+          visible: root.hotspotEditing
+          width: parent.width
+          spacing: Style.space(6)
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+
+            Text {
+              text: "HOTSPOT SSID (NAME)"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            TextField {
+              id: hotspotSsidField
+              width: parent.width
+              text: root.hotspotDraftSsid
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              color: root.bar.foreground
+              padding: Style.space(6)
+              placeholderText: "e.g. Omarchy-Hotspot"
+              background: Rectangle {
+                radius: Style.radius.small
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                border.color: hotspotSsidField.activeFocus ? root.bar.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                border.width: 1
+              }
+              onTextChanged: root.hotspotDraftSsid = text
+              onActiveFocusChanged: root.hotspotInputFocused = activeFocus
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Tab || event.key === Qt.Key_Down) {
+                  hotspotPasswordField.forceActiveFocus()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
+                  root.cancelHotspotEdit()
+                  event.accepted = true
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+
+            Text {
+              text: "WPA2 PASSPHRASE (MIN 8 CHARS)"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            TextField {
+              id: hotspotPasswordField
+              width: parent.width
+              text: root.hotspotDraftPassword
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              color: root.bar.foreground
+              padding: Style.space(6)
+              placeholderText: "Min 8 characters"
+              echoMode: root.hotspotPasswordVisible ? TextInput.Normal : TextInput.Password
+              background: Rectangle {
+                radius: Style.radius.small
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                border.color: hotspotPasswordField.activeFocus ? root.bar.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                border.width: 1
+              }
+              onTextChanged: root.hotspotDraftPassword = text
+              onActiveFocusChanged: root.hotspotInputFocused = activeFocus
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Tab || event.key === Qt.Key_Down) {
+                  hotspotSaveBtn.forceActiveFocus()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Backtab || event.key === Qt.Key_Up) {
+                  hotspotSsidField.forceActiveFocus()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
+                  root.cancelHotspotEdit()
+                  event.accepted = true
+                }
+              }
+            }
+          }
+
+          // Band selection row
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property real cellWidth: (width - spacing) / 2
+
+            Button {
+              width: parent.cellWidth
+              text: "2.4 GHz"
+              tooltipText: "2.4 GHz band (maximum compatibility)"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.hotspotDraftBand === "bg"
+              onClicked: root.hotspotDraftBand = "bg"
+            }
+
+            Button {
+              width: parent.cellWidth
+              text: "5 GHz"
+              tooltipText: "5 GHz band (faster throughput)"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.hotspotDraftBand === "a"
+              onClicked: root.hotspotDraftBand = "a"
+            }
+          }
+
+          // Save / Cancel row
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property real cellWidth: (width - spacing) / 2
+
+            Button {
+              id: hotspotSaveBtn
+              width: parent.cellWidth
+              text: "Save & Apply"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: true
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 1 && root.hotspotActionIndex === 0
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 0
+              }
+              onClicked: root.saveHotspot()
+            }
+
+            Button {
+              id: hotspotCancelBtn
+              width: parent.cellWidth
+              text: "Cancel"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              hasCursor: root.cursorActive && !root.hotspotInputFocused && root.focusSection === "hotspot" && root.hotspotRow === 1 && root.hotspotActionIndex === 1
+              onHovered: function(isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "hotspot"
+                root.hotspotRow = 1
+                root.hotspotActionIndex = 1
+              }
+              onClicked: root.cancelHotspotEdit()
+            }
+          }
+        }
       }
 
       // Wired connection (IPv4 configuration)
