@@ -406,17 +406,15 @@ var hotspotQueryScript =
   'for d in /tmp/create_ap.*.conf.*; do ' +
   '  if [[ -d "$d" && -f "$d/pid" ]]; then ' +
   '    pid=$(cat "$d/pid" 2>/dev/null); ' +
-  '    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then ' +
+  '    if [[ -n "$pid" && -d "/proc/$pid" ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
   '      cap_running="true"; ' +
-  '      if [[ -f "$d/hostapd.conf" ]]; then ' +
-  '        cap_ssid=$(grep "^ssid=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
-  '        cap_pwd=$(grep "^wpa_passphrase=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
-  '        mode=$(grep "^hw_mode=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
-  '        if [[ "$mode" == "a" ]]; then cap_band="a"; else cap_band="bg"; fi; ' +
-  '        viface=$(grep "^interface=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
-  '        if [[ -n "$viface" ]]; then ' +
-  '          cap_clients=$(iw dev "$viface" station dump 2>/dev/null | grep -c "^Station " || echo 0); ' +
-  '        fi; ' +
+  '      viface=$(cat "$d/wifi_iface" 2>/dev/null); ' +
+  '      if [[ -n "$viface" && -d "/sys/class/net/$viface" ]]; then ' +
+  '        info_ssid=$(iw dev "$viface" info 2>/dev/null | sed -n \'s/^[[:space:]]*ssid[[:space:]]\\+//p\'); ' +
+  '        if [[ -n "$info_ssid" ]]; then cap_ssid="$info_ssid"; fi; ' +
+  '        cap_freq=$(iw dev "$viface" info 2>/dev/null | grep -o \'([0-9]\\+ MHz)\' | tr -d \'() MHz\'); ' +
+  '        if [[ -n "$cap_freq" && "$cap_freq" -gt 5000 ]]; then cap_band="a"; else cap_band="bg"; fi; ' +
+  '        cap_clients=$(iw dev "$viface" station dump 2>/dev/null | awk \'/^Station /{c++} END{print c+0}\'); ' +
   '      fi; ' +
   '      break; ' +
   '    fi; ' +
@@ -436,10 +434,10 @@ var hotspotQueryScript =
   '  if nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then nm_active="true"; fi; ' +
   'fi; ' +
   'if [[ "$cap_running" == "true" ]]; then ' +
-  '  active="true"; is_repeater="true"; ssid="${cap_ssid:-$nm_ssid}"; pwd="${cap_pwd:-$nm_pwd}"; band="$cap_band"; clients="$cap_clients"; ' +
+  '  active="true"; is_repeater="true"; ssid="${cap_ssid:-$nm_ssid}"; pwd="${nm_pwd:-$cap_pwd}"; band="$cap_band"; clients="$cap_clients"; ' +
   'elif [[ "$nm_active" == "true" ]]; then ' +
   '  active="true"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; ' +
-  '  clients=$(iw dev "$dev" station dump 2>/dev/null | grep -c "^Station " || echo 0); ' +
+  '  clients=$(iw dev "$dev" station dump 2>/dev/null | awk \'/^Station /{c++} END{print c+0}\'); ' +
   'else ' +
   '  active="false"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; clients=0; ' +
   'fi; ' +
@@ -465,22 +463,35 @@ var hotspotApplyScript =
   '  fi; ' +
   '  exit 0; ' +
   'fi; ' +
-  'is_running="false"; ' +
+  'is_running="false"; running_pid=""; ' +
   'for d in /tmp/create_ap.*.conf.*; do ' +
-  '  if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
-  '    is_running="true"; break; ' +
+  '  if [[ -d "$d" && -f "$d/pid" ]]; then ' +
+  '    pid=$(cat "$d/pid" 2>/dev/null); ' +
+  '    if [[ -n "$pid" && -d "/proc/$pid" ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
+  '      is_running="true"; running_pid="$pid"; break; ' +
+  '    fi; ' +
   '  fi; ' +
   'done; ' +
   'if [[ "$is_running" == "false" ]] && nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then ' +
   '  is_running="true"; ' +
   'fi; ' +
   'if [[ "$action" == "stop" ]] || [[ "$action" == "toggle" && "$is_running" == "true" ]]; then ' +
+  '  if [[ -n "$running_pid" ]]; then ' +
+  '    pkexec create_ap --stop "$running_pid" >/dev/null 2>&1 || true; ' +
+  '  fi; ' +
   '  for d in /tmp/create_ap.*.conf.*; do ' +
-  '    if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
-  '      w_iface=$(cat "$d/wifi_iface" 2>/dev/null || echo "$dev"); ' +
-  '      pkexec create_ap --stop "$w_iface" >/dev/null 2>&1 || true; ' +
+  '    if [[ -d "$d" && -f "$d/pid" ]]; then ' +
+  '      p=$(cat "$d/pid" 2>/dev/null); ' +
+  '      if [[ -n "$p" && -d "/proc/$p" ]] && grep -q "create_ap" "/proc/$p/cmdline" 2>/dev/null; then ' +
+  '        pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
+  '      fi; ' +
   '    fi; ' +
   '  done; ' +
+  '  if [[ -n "$dev" ]]; then ' +
+  '    for p in $(pgrep -f "create_ap.*$dev" 2>/dev/null); do ' +
+  '      pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
+  '    done; ' +
+  '  fi; ' +
   '  nmcli con down "$con" >/dev/null 2>&1 || true; ' +
   '  exit 0; ' +
   'fi; ' +
@@ -503,11 +514,17 @@ var hotspotApplyScript =
   '    fi; ' +
   '  fi; ' +
   '  pkexec create_ap --daemon "$dev" "$dev" "$ssid" "$pwd"; ' +
-  '  for i in {1..6}; do ' +
+  '  for i in {1..14}; do ' +
   '    sleep 0.5; ' +
   '    for d in /tmp/create_ap.*.conf.*; do ' +
-  '      if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
-  '        exit 0; ' +
+  '      if [[ -d "$d" && -f "$d/pid" ]]; then ' +
+  '        pid=$(cat "$d/pid" 2>/dev/null); ' +
+  '        if [[ -n "$pid" && -d "/proc/$pid" ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
+  '          viface=$(cat "$d/wifi_iface" 2>/dev/null); ' +
+  '          if [[ -n "$viface" && -d "/sys/class/net/$viface" ]]; then ' +
+  '            exit 0; ' +
+  '          fi; ' +
+  '        fi; ' +
   '      fi; ' +
   '    done; ' +
   '  done; ' +

@@ -1238,10 +1238,13 @@ Panel {
   // as soon as NetworkManager finishes activating a connection.
   Timer {
     id: detailsPoll
-    interval: 1500
+    interval: 2000
     repeat: true
     running: root.opened
-    onTriggered: if (!detailsProc.running) detailsProc.running = true
+    onTriggered: {
+      if (!detailsProc.running) detailsProc.running = true
+      if (!hotspotProc.running && !hotspotApplyProc.running) root.refreshHotspot()
+    }
   }
 
   Timer {
