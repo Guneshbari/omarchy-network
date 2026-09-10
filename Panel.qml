@@ -587,7 +587,13 @@ Panel {
       payload.iface = info.iface
       if (info.ssid) payload.ssid = info.ssid
     }
-    bar.shell.summon("omarchy.wifiqr", JSON.stringify(payload))
+    var jsonPayload = JSON.stringify(payload)
+    if (root.bar && root.bar.shell && typeof root.bar.shell.summon === "function") {
+      try {
+        if (root.bar.shell.summon("omarchy.wifiqr", jsonPayload)) return
+      } catch (e) {}
+    }
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon", "omarchy.wifiqr", jsonPayload])
   }
 
   function refresh(scanWifi) {
@@ -779,7 +785,13 @@ Panel {
     var connection = ""
     if (info.type === "wifi") connection = info.ssid || "Wi-Fi"
     else if (info.type === "ethernet") connection = "Ethernet"
-    bar.shell.summon("omarchy.speedtest", connection ? JSON.stringify({ connection: connection }) : "{}")
+    var jsonPayload = connection ? JSON.stringify({ connection: connection }) : "{}"
+    if (root.bar && root.bar.shell && typeof root.bar.shell.summon === "function") {
+      try {
+        if (root.bar.shell.summon("omarchy.speedtest", jsonPayload)) return
+      } catch (e) {}
+    }
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon", "omarchy.speedtest", jsonPayload])
   }
 
   function dnsCommand(provider) {
