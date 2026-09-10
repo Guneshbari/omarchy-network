@@ -1331,16 +1331,6 @@ Panel {
     }
   }
 
-  onHotspotQrOpenChanged: {
-    if (hotspotQrOpen) {
-      Qt.callLater(function() {
-        if (root.hotspotQrOpen && hotspotKeyCatcher) {
-          hotspotKeyCatcher.forceActiveFocus()
-        }
-      })
-    }
-  }
-
   Process {
     id: hotspotQrProc
     stdout: StdioCollector {
