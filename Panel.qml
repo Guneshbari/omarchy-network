@@ -1580,7 +1580,7 @@ Panel {
             tooltipText: root.hotspotActive
               ? ((root.hotspotIsRepeater ? "Repeater Active (" : "Hotspot Active (") + root.hotspotClients + " connected) - Click to Stop")
               : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Start Wi-Fi Repeater" : "Start Wi-Fi Hotspot")
-            foreground: root.hotspotActive ? root.bar.accent : root.bar.foreground
+            foreground: root.hotspotActive ? Color.accent : root.bar.foreground
             fontFamily: root.bar.fontFamily
             iconSize: Style.font.subtitle * 1.5
             horizontalPadding: Style.space(5)
@@ -1846,6 +1846,7 @@ Panel {
             }
           }
         }
+      }
 
       // Wi-Fi Hotspot
       PanelSeparator {
@@ -1881,9 +1882,9 @@ Panel {
             Rectangle {
               id: hotspotBadge
               anchors.verticalCenter: parent.verticalCenter
-              radius: Style.radius.full
-              color: root.hotspotActive ? Qt.rgba(root.bar.accent.r, root.bar.accent.g, root.bar.accent.b, 0.2) : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-              border.color: root.hotspotActive ? root.bar.accent : "transparent"
+              radius: height / 2
+              color: root.hotspotActive ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2) : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+              border.color: root.hotspotActive ? Color.accent : "transparent"
               border.width: 1
               implicitWidth: hotspotBadgeText.implicitWidth + Style.space(12)
               implicitHeight: hotspotBadgeText.implicitHeight + Style.space(4)
@@ -1894,7 +1895,7 @@ Panel {
                 text: root.hotspotActive
                   ? (root.hotspotClients > 0 ? "ACTIVE (" + root.hotspotClients + ")" : "ACTIVE")
                   : "INACTIVE"
-                color: root.hotspotActive ? root.bar.accent : Qt.darker(root.bar.foreground, 1.4)
+                color: root.hotspotActive ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -1905,9 +1906,9 @@ Panel {
               id: hotspotRepeaterBadge
               visible: root.hotspotActive && root.hotspotIsRepeater
               anchors.verticalCenter: parent.verticalCenter
-              radius: Style.radius.full
-              color: Qt.rgba(root.bar.accent.r, root.bar.accent.g, root.bar.accent.b, 0.15)
-              border.color: root.bar.accent
+              radius: height / 2
+              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+              border.color: Color.accent
               border.width: 1
               implicitWidth: hotspotRepeaterBadgeText.implicitWidth + Style.space(10)
               implicitHeight: hotspotRepeaterBadgeText.implicitHeight + Style.space(4)
@@ -1916,7 +1917,7 @@ Panel {
                 id: hotspotRepeaterBadgeText
                 anchors.centerIn: parent
                 text: "󰤨 REPEATER"
-                color: root.bar.accent
+                color: Color.accent
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -1994,7 +1995,7 @@ Panel {
         // Status message if busy or error
         Text {
           text: root.hotspotStatusMsg
-          color: root.hotspotStatusIsError ? root.bar.urgent : root.bar.accent
+          color: root.hotspotStatusIsError ? Color.urgent : Color.accent
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -2162,9 +2163,9 @@ Panel {
               padding: Style.space(6)
               placeholderText: "e.g. Omarchy-Hotspot"
               background: Rectangle {
-                radius: Style.radius.small
+                radius: Style.cornerRadius
                 color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-                border.color: hotspotSsidField.activeFocus ? root.bar.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                border.color: hotspotSsidField.activeFocus ? Color.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                 border.width: 1
               }
               onTextChanged: root.hotspotDraftSsid = text
@@ -2204,9 +2205,9 @@ Panel {
               placeholderText: "Min 8 characters"
               echoMode: root.hotspotPasswordVisible ? TextInput.Normal : TextInput.Password
               background: Rectangle {
-                radius: Style.radius.small
+                radius: Style.cornerRadius
                 color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-                border.color: hotspotPasswordField.activeFocus ? root.bar.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
+                border.color: hotspotPasswordField.activeFocus ? Color.accent : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2)
                 border.width: 1
               }
               onTextChanged: root.hotspotDraftPassword = text
@@ -2816,7 +2817,6 @@ Panel {
           }
         }
       }
-    }
     }
   }
 
