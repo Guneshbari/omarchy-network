@@ -128,6 +128,10 @@ Panel {
   property bool hotspotActive: false
   property string hotspotDevice: ""
   property int hotspotClients: 0
+  property bool hotspotIsRepeater: false
+  property bool hotspotHasCreateAp: false
+  property bool hotspotWifiConnected: false
+  property bool hotspotRepeaterCapable: false
   property bool hotspotBusy: false
   property bool hotspotPasswordVisible: false
   property bool hotspotEditing: false
@@ -871,6 +875,10 @@ Panel {
         root.hotspotActive = !!data.active
         root.hotspotDevice = data.device || ""
         root.hotspotClients = data.clients || 0
+        root.hotspotIsRepeater = !!data.isRepeater
+        root.hotspotHasCreateAp = !!data.hasCreateAp
+        root.hotspotWifiConnected = !!data.wifiConnected
+        root.hotspotRepeaterCapable = !!data.repeaterCapable
         if (!root.hotspotEditing) {
           root.hotspotDraftSsid = root.hotspotSsid
           root.hotspotDraftPassword = root.hotspotPassword
@@ -890,7 +898,9 @@ Panel {
   function toggleHotspot() {
     if (root.hotspotBusy) return
     root.hotspotBusy = true
-    root.hotspotStatusMsg = root.hotspotActive ? "Stopping hotspot..." : "Starting hotspot..."
+    root.hotspotStatusMsg = root.hotspotActive
+      ? "Stopping hotspot..."
+      : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Starting Wi-Fi repeater..." : "Starting hotspot...")
     root.hotspotStatusIsError = false
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
@@ -1566,10 +1576,10 @@ Panel {
           Button {
             id: hotspotAction
             visible: root.hasHotspotSupport
-            iconText: "󱛇"
+            iconText: root.hotspotActive && root.hotspotIsRepeater ? "󰤨" : "󱛇"
             tooltipText: root.hotspotActive
-              ? "Hotspot Active (" + root.hotspotClients + " connected) - Click to Stop"
-              : "Start Wi-Fi Hotspot"
+              ? ((root.hotspotIsRepeater ? "Repeater Active (" : "Hotspot Active (") + root.hotspotClients + " connected) - Click to Stop")
+              : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Start Wi-Fi Repeater" : "Start Wi-Fi Hotspot")
             foreground: root.hotspotActive ? root.bar.accent : root.bar.foreground
             fontFamily: root.bar.fontFamily
             iconSize: Style.font.subtitle * 1.5
@@ -1890,6 +1900,28 @@ Panel {
                 font.bold: true
               }
             }
+
+            Rectangle {
+              id: hotspotRepeaterBadge
+              visible: root.hotspotActive && root.hotspotIsRepeater
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.radius.full
+              color: Qt.rgba(root.bar.accent.r, root.bar.accent.g, root.bar.accent.b, 0.15)
+              border.color: root.bar.accent
+              border.width: 1
+              implicitWidth: hotspotRepeaterBadgeText.implicitWidth + Style.space(10)
+              implicitHeight: hotspotRepeaterBadgeText.implicitHeight + Style.space(4)
+
+              Text {
+                id: hotspotRepeaterBadgeText
+                anchors.centerIn: parent
+                text: "󰤨 REPEATER"
+                color: root.bar.accent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+            }
           }
 
           Row {
@@ -1918,11 +1950,45 @@ Panel {
 
               PanelToolTip {
                 visible: hotspotSwitch.containsMouse
-                text: root.hotspotActive ? "Stop Wi-Fi Hotspot" : "Start Wi-Fi Hotspot"
+                text: {
+                  if (root.hotspotActive) return "Stop Wi-Fi Hotspot"
+                  if (root.hotspotWifiConnected && root.hotspotHasCreateAp) {
+                    return root.hotspotRepeaterCapable
+                      ? "Start Wi-Fi Repeater (keep Wi-Fi connected)"
+                      : "Cannot repeat restricted 5GHz channel"
+                  }
+                  return "Start Wi-Fi Hotspot"
+                }
                 fontFamily: root.bar.fontFamily
               }
             }
           }
+        }
+
+        // Subtitle / capability hint
+        Text {
+          visible: root.hotspotStatusMsg === ""
+          text: {
+            if (root.hotspotActive) {
+              return root.hotspotIsRepeater
+                ? "󰤨 Repeating active Wi-Fi without disconnecting"
+                : "󱛇 Broadcasting standalone Wi-Fi hotspot"
+            }
+            if (root.hotspotWifiConnected) {
+              if (!root.hotspotHasCreateAp) {
+                return "󰤮 Install linux-wifi-hotspot for simultaneous Wi-Fi repeater"
+              }
+              return root.hotspotRepeaterCapable
+                ? "󰤨 Repeater ready · Shares active Wi-Fi without disconnecting"
+                : "󰤩 5GHz channel restricted (no-IR) · Connect to 2.4GHz Wi-Fi to repeat"
+            }
+            return "Standard Wi-Fi Access Point"
+          }
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          width: parent.width
         }
 
         // Status message if busy or error
@@ -1931,6 +1997,8 @@ Panel {
           color: root.hotspotStatusIsError ? root.bar.urgent : root.bar.accent
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          width: parent.width
           visible: text !== ""
         }
 

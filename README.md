@@ -9,9 +9,11 @@ An enhanced Network bar widget and popup panel for the Omarchy Linux desktop she
 ## Features
 
 - 🌐 **Wi-Fi Management**: Scan, connect, disconnect, and enter passphrases for known and nearby networks.
-- 📡 **Wi-Fi Hotspot (AP Mode)**:
-  - One-click toggle switch to create and broadcast an instant Wi-Fi access point.
+- 📡 **Wi-Fi Hotspot & Repeater (Network Chaining)**:
+  - **Simultaneous Wi-Fi Chaining**: When connected to Wi-Fi, turn on the hotspot as a repeater (`create_ap`) without disconnecting from your active Wi-Fi connection.
+  - One-click toggle switch to create and broadcast an instant Wi-Fi access point or repeater.
   - Fully customizable **SSID** and **WPA2 Passphrase** with inline Show/Hide password toggle.
+  - Smart regulatory domain & channel pre-flight checks (notifies if your wireless card's firmware restricts 5 GHz AP initiation).
   - Band switching between **2.4 GHz** (maximum device compatibility) and **5 GHz** (high speed).
   - Real-time **connected client counter** and quick **Share QR Code** generation.
 - 🔌 **Wired Connection GUI**:
@@ -95,10 +97,11 @@ omarchy restart shell
 ---
 
 ## Dependencies
-
-- **NetworkManager** (`nmcli`)
-- **Omarchy Shell** (`quickshell`)
-- **Hyprland**
+ 
+ - **NetworkManager** (`nmcli`)
+ - **Omarchy Shell** (`quickshell`)
+ - **Hyprland**
+ - *(Optional for Wi-Fi Repeater)*: **linux-wifi-hotspot** (`create_ap`) for simultaneous Wi-Fi chaining (`sudo pacman -S linux-wifi-hotspot`)
 
 To ensure `nmtui` always opens in a centered floating window, add this rule to your `~/.config/hypr/hyprland.lua`:
 

@@ -389,30 +389,62 @@ var hotspotQueryScript =
   'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
   'has_ap="false"; ' +
   'if [[ -n "$dev" ]] && iw list 2>/dev/null | grep -A 8 "Supported interface modes" | grep -q "AP"; then has_ap="true"; fi; ' +
+  'has_create_ap="false"; ' +
+  'if command -v create_ap >/dev/null 2>&1; then has_create_ap="true"; fi; ' +
+  'wifi_connected="false"; ' +
+  'if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q "^${dev}:connected"; then wifi_connected="true"; fi; ' +
+  'repeater_capable="false"; ' +
+  'if [[ "$has_create_ap" == "true" && "$wifi_connected" == "true" && -n "$dev" ]]; then ' +
+  '  freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1); ' +
+  '  if [[ -n "$freq" ]]; then ' +
+  '    phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0"); ' +
+  '    ch_info=$(iw phy "$phy" info 2>/dev/null | grep -E "\\* ${freq}\\.[0-9]+ MHz"); ' +
+  '    if [[ "$ch_info" != *"no IR"* ]]; then repeater_capable="true"; fi; ' +
+  '  fi; ' +
+  'fi; ' +
+  'cap_running="false"; cap_ssid=""; cap_pwd=""; cap_band="bg"; cap_clients=0; ' +
+  'for d in /tmp/create_ap.*.conf.*; do ' +
+  '  if [[ -d "$d" && -f "$d/pid" ]]; then ' +
+  '    pid=$(cat "$d/pid" 2>/dev/null); ' +
+  '    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then ' +
+  '      cap_running="true"; ' +
+  '      if [[ -f "$d/hostapd.conf" ]]; then ' +
+  '        cap_ssid=$(grep "^ssid=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
+  '        cap_pwd=$(grep "^wpa_passphrase=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
+  '        mode=$(grep "^hw_mode=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
+  '        if [[ "$mode" == "a" ]]; then cap_band="a"; else cap_band="bg"; fi; ' +
+  '        viface=$(grep "^interface=" "$d/hostapd.conf" 2>/dev/null | cut -d= -f2-); ' +
+  '        if [[ -n "$viface" ]]; then ' +
+  '          cap_clients=$(iw dev "$viface" station dump 2>/dev/null | grep -c "^Station " || echo 0); ' +
+  '        fi; ' +
+  '      fi; ' +
+  '      break; ' +
+  '    fi; ' +
+  '  fi; ' +
+  'done; ' +
   'con=""; ' +
   'for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
   '  mode=$(nmcli -g 802-11-wireless.mode con show "$uuid" 2>/dev/null); ' +
   '  if [[ "$mode" == "ap" ]]; then con=$(nmcli -g connection.id con show "$uuid" 2>/dev/null); break; fi; ' +
   'done; ' +
   'if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
+  'nm_active="false"; nm_ssid=""; nm_pwd=""; nm_band=""; ' +
   'if nmcli connection show "$con" >/dev/null 2>&1; then ' +
-  '  ssid=$(nmcli -s -g 802-11-wireless.ssid connection show "$con" 2>/dev/null); ' +
-  '  pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show "$con" 2>/dev/null); ' +
-  '  band=$(nmcli -s -g 802-11-wireless.band connection show "$con" 2>/dev/null); ' +
-  '  is_act=$(nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep "^${con}:yes" || true); ' +
-  '  if [[ -n "$is_act" ]]; then active="true"; else active="false"; fi; ' +
-  'else ' +
-  '  ssid="Omarchy-Hotspot"; ' +
-  '  pwd="omarchy12345"; ' +
-  '  band="bg"; ' +
-  '  active="false"; ' +
+  '  nm_ssid=$(nmcli -s -g 802-11-wireless.ssid connection show "$con" 2>/dev/null); ' +
+  '  nm_pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show "$con" 2>/dev/null); ' +
+  '  nm_band=$(nmcli -s -g 802-11-wireless.band connection show "$con" 2>/dev/null); ' +
+  '  if nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then nm_active="true"; fi; ' +
   'fi; ' +
-  'clients=0; ' +
-  'if [[ "$active" == "true" && -n "$dev" ]]; then ' +
+  'if [[ "$cap_running" == "true" ]]; then ' +
+  '  active="true"; is_repeater="true"; ssid="${cap_ssid:-$nm_ssid}"; pwd="${cap_pwd:-$nm_pwd}"; band="$cap_band"; clients="$cap_clients"; ' +
+  'elif [[ "$nm_active" == "true" ]]; then ' +
+  '  active="true"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; ' +
   '  clients=$(iw dev "$dev" station dump 2>/dev/null | grep -c "^Station " || echo 0); ' +
+  'else ' +
+  '  active="false"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; clients=0; ' +
   'fi; ' +
-  'jq -nc --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg pwd "${pwd:-omarchy12345}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson hasAp "$has_ap" ' +
-  '  \'{"name": $con, "ssid": $ssid, "password": $pwd, "band": $band, "active": $active, "device": $dev, "clients": $clients, "hasAp": $hasAp}\''
+  'jq -nc --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg pwd "${pwd:-omarchy12345}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --argjson repeaterCapable "$repeater_capable" ' +
+  '  \'{"name": $con, "ssid": $ssid, "password": $pwd, "band": $band, "active": $active, "device": $dev, "clients": $clients, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "wifiConnected": $wifiConnected, "repeaterCapable": $repeaterCapable}\''
 
 var hotspotApplyScript =
   'action="$1"; con="$2"; ssid="$3"; pwd="$4"; band="$5"; ' +
@@ -421,24 +453,79 @@ var hotspotApplyScript =
   'if [[ -z "$pwd" ]]; then pwd="omarchy12345"; fi; ' +
   'if [[ -z "$band" ]]; then band="bg"; fi; ' +
   'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
-  'if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
-  '  nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
-  '    802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
-  '    802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
-  '    ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
-  'else ' +
-  '  nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
-  '    802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
-  'fi; ' +
-  'if [[ "$action" == "start" ]]; then ' +
-  '  nmcli con up "$con" >/dev/null 2>&1; ' +
-  'elif [[ "$action" == "stop" ]]; then ' +
-  '  nmcli con down "$con" >/dev/null 2>&1; ' +
-  'elif [[ "$action" == "toggle" ]]; then ' +
-  '  if nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then ' +
-  '    nmcli con down "$con" >/dev/null 2>&1; ' +
+  'if [[ "$action" == "save" ]]; then ' +
+  '  if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
+  '    nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
+  '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
+  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
   '  else ' +
-  '    nmcli con up "$con" >/dev/null 2>&1; ' +
+  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
+  '      802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
+  '  fi; ' +
+  '  exit 0; ' +
+  'fi; ' +
+  'is_running="false"; ' +
+  'for d in /tmp/create_ap.*.conf.*; do ' +
+  '  if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
+  '    is_running="true"; break; ' +
+  '  fi; ' +
+  'done; ' +
+  'if [[ "$is_running" == "false" ]] && nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q "^${con}:yes"; then ' +
+  '  is_running="true"; ' +
+  'fi; ' +
+  'if [[ "$action" == "stop" ]] || [[ "$action" == "toggle" && "$is_running" == "true" ]]; then ' +
+  '  for d in /tmp/create_ap.*.conf.*; do ' +
+  '    if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
+  '      w_iface=$(cat "$d/wifi_iface" 2>/dev/null || echo "$dev"); ' +
+  '      pkexec create_ap --stop "$w_iface" >/dev/null 2>&1 || true; ' +
+  '    fi; ' +
+  '  done; ' +
+  '  nmcli con down "$con" >/dev/null 2>&1 || true; ' +
+  '  exit 0; ' +
+  'fi; ' +
+  'wifi_connected="false"; ' +
+  'if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q "^${dev}:connected"; then ' +
+  '  wifi_connected="true"; ' +
+  'fi; ' +
+  'if [[ "$wifi_connected" == "true" ]]; then ' +
+  '  if ! command -v create_ap >/dev/null 2>&1; then ' +
+  '    echo "Wi-Fi is connected. Install linux-wifi-hotspot for simultaneous repeater chaining." >&2; ' +
+  '    exit 1; ' +
+  '  fi; ' +
+  '  freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1); ' +
+  '  if [[ -n "$freq" ]]; then ' +
+  '    phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0"); ' +
+  '    ch_info=$(iw phy "$phy" info 2>/dev/null | grep -E "\\* ${freq}\\.[0-9]+ MHz"); ' +
+  '    if [[ "$ch_info" == *"no IR"* ]]; then ' +
+  '      echo "Cannot repeat: current 5GHz Wi-Fi channel is restricted (no-IR) by card firmware. Connect to 2.4GHz Wi-Fi to repeat." >&2; ' +
+  '      exit 1; ' +
+  '    fi; ' +
+  '  fi; ' +
+  '  pkexec create_ap --daemon "$dev" "$dev" "$ssid" "$pwd"; ' +
+  '  for i in {1..6}; do ' +
+  '    sleep 0.5; ' +
+  '    for d in /tmp/create_ap.*.conf.*; do ' +
+  '      if [[ -d "$d" && -f "$d/pid" ]] && kill -0 $(cat "$d/pid" 2>/dev/null) 2>/dev/null; then ' +
+  '        exit 0; ' +
+  '      fi; ' +
+  '    done; ' +
+  '  done; ' +
+  '  echo "Failed to start repeater access point" >&2; ' +
+  '  exit 1; ' +
+  'else ' +
+  '  if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
+  '    nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
+  '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
+  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
+  '  else ' +
+  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
+  '      802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
+  '  fi; ' +
+  '  if ! nmcli con up "$con" >/dev/null 2>&1; then ' +
+  '    echo "Failed to start hotspot" >&2; ' +
+  '    exit 1; ' +
   '  fi; ' +
   'fi'
 
