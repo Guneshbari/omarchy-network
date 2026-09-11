@@ -479,6 +479,11 @@ Panel {
       internetPingLatency = -1
       internetPingPacketLoss = 0
       setScannerEnabled(false)
+      hotspotEditing = false
+      hotspotDraftPassword = ""
+      passwordSsid = ""
+      passwordText = ""
+      identityText = ""
     }
   }
 
@@ -489,6 +494,7 @@ Panel {
   onPasswordSsidChanged: {
     if (passwordSsid === "" && opened) {
       passwordText = ""
+      identityText = ""
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
     }
   }
@@ -580,9 +586,23 @@ Panel {
     ? Math.round((connectedWifiNetwork.signalStrength || 0) * 100)
     : -1
 
-  function copyToClipboard(value) {
-    if (!value || !root.bar) return
-    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(value) + " | wl-copy"])
+  Process {
+    id: clipboardProc
+    property string textToCopy: ""
+    property bool sensitive: false
+    command: sensitive ? ["wl-copy", "--trim-newline", "--sensitive"] : ["wl-copy", "--trim-newline"]
+    stdinEnabled: true
+    onStarted: {
+      write(textToCopy)
+      textToCopy = ""
+    }
+  }
+
+  function copyToClipboard(value, sensitive) {
+    if (!value) return
+    clipboardProc.sensitive = !!sensitive
+    clipboardProc.textToCopy = String(value)
+    clipboardProc.running = true
   }
 
   readonly property string icon: Model.connectionIcon(kind, signalStrength)
@@ -932,12 +952,12 @@ Panel {
       ? "Stopping hotspot..."
       : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Starting Wi-Fi repeater..." : "Starting hotspot...")
     root.hotspotStatusIsError = false
+    hotspotApplyProc.secret = root.hotspotPassword || "omarchy12345"
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "toggle",
       root.hotspotName || "Hotspot",
       root.hotspotSsid || "Omarchy-Hotspot",
-      root.hotspotPassword || "omarchy12345",
       root.hotspotBand || "bg"
     ]
     hotspotApplyProc.running = true
@@ -958,12 +978,12 @@ Panel {
     root.hotspotBusy = true
     root.hotspotStatusMsg = "Saving..."
     root.hotspotStatusIsError = false
+    hotspotApplyProc.secret = root.hotspotDraftPassword || root.hotspotPassword || "omarchy12345"
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "save",
       root.hotspotName || "Hotspot",
       root.hotspotDraftSsid,
-      root.hotspotDraftPassword,
       root.hotspotDraftBand
     ]
     hotspotApplyProc.running = true
@@ -982,6 +1002,7 @@ Panel {
 
   function cancelHotspotEdit() {
     root.hotspotEditing = false
+    root.hotspotDraftPassword = ""
     root.hotspotStatusMsg = ""
     root.hotspotStatusIsError = false
     root.hotspotRow = 0
@@ -1040,10 +1061,10 @@ Panel {
     root.hotspotQrError = ""
     root.hotspotQrSize = 0
     root.hotspotQrRows = []
+    hotspotQrProc.secret = root.hotspotPassword || ""
     hotspotQrProc.command = [
       "bash", "-c", Model.hotspotQrScript, "hotspot-qr",
-      root.hotspotSsid || "Omarchy-Hotspot",
-      root.hotspotPassword || ""
+      root.hotspotSsid || "Omarchy-Hotspot"
     ]
     hotspotQrProc.running = true
   }
@@ -1062,7 +1083,7 @@ Panel {
 
   function copyHotspotPassword() {
     if (!root.hotspotPassword) return
-    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(root.hotspotPassword) + " | wl-copy"])
+    root.copyToClipboard(root.hotspotPassword, true)
     root.hotspotPasswordCopied = true
     hotspotCopiedTimer.restart()
   }
@@ -1319,6 +1340,12 @@ Panel {
 
   Process {
     id: hotspotApplyProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
     stdout: StdioCollector {
       id: hotspotApplyOut
       waitForEnd: true
@@ -1329,6 +1356,7 @@ Panel {
     }
     onExited: function(exitCode) {
       root.hotspotBusy = false
+      root.hotspotDraftPassword = ""
       if (exitCode === 0) {
         root.hotspotEditing = false
         root.hotspotStatusMsg = ""
@@ -1351,6 +1379,12 @@ Panel {
 
   Process {
     id: hotspotQrProc
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
     stdout: StdioCollector {
       id: qrStdout
       waitForEnd: true

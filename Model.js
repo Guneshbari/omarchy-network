@@ -441,11 +441,16 @@ var hotspotQueryScript =
   'else ' +
   '  active="false"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; clients=0; ' +
   'fi; ' +
-  'jq -nc --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg pwd "${pwd:-omarchy12345}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --argjson repeaterCapable "$repeater_capable" ' +
-  '  \'{"name": $con, "ssid": $ssid, "password": $pwd, "band": $band, "active": $active, "device": $dev, "clients": $clients, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "wifiConnected": $wifiConnected, "repeaterCapable": $repeaterCapable}\''
+  'printf "%s" "${pwd:-omarchy12345}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --argjson repeaterCapable "$repeater_capable" ' +
+  '  \'{"name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "wifiConnected": $wifiConnected, "repeaterCapable": $repeaterCapable}\''
 
+// The password arrives on stdin and reaches nmcli through the scriptable
+// `connection edit` editor or create_ap through a protected temporary config file.
+// argv is world-readable in /proc, so the secret must never be an argument
+// (printf is a bash builtin, so no process spawns with it either).
 var hotspotApplyScript =
-  'action="$1"; con="$2"; ssid="$3"; pwd="$4"; band="$5"; ' +
+  'IFS= read -r pwd; ' +
+  'action="$1"; con="$2"; ssid="$3"; band="$4"; ' +
   'if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
   'if [[ -z "$ssid" ]]; then ssid="Omarchy-Hotspot"; fi; ' +
   'if [[ -z "$pwd" ]]; then pwd="omarchy12345"; fi; ' +
@@ -455,11 +460,14 @@ var hotspotApplyScript =
   '  if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
   '    nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
   '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
-  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk ' +
+  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1 || { echo "Failed to create hotspot connection" >&2; exit 1; }; ' +
   '  else ' +
-  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
-  '      802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
+  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" >/dev/null 2>&1 || true; ' +
+  '  fi; ' +
+  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit "$con" >/dev/null 2>&1; then ' +
+  '    echo "Failed to configure hotspot password" >&2; ' +
+  '    exit 1; ' +
   '  fi; ' +
   '  exit 0; ' +
   'fi; ' +
@@ -513,7 +521,14 @@ var hotspotApplyScript =
   '      exit 1; ' +
   '    fi; ' +
   '  fi; ' +
-  '  pkexec create_ap --daemon "$dev" "$dev" "$ssid" "$pwd"; ' +
+  '  cap_sec_dir=$(mktemp -d /tmp/create_ap_sec.XXXXXX); ' +
+  '  chmod 700 "$cap_sec_dir"; ' +
+  '  cap_conf="$cap_sec_dir/ap.conf"; ' +
+  '  freq_band="2.4"; if [[ "$band" == "a" ]]; then freq_band="5"; fi; ' +
+  '  printf "WIFI_IFACE=%s\\nINTERNET_IFACE=%s\\nSSID=%s\\nPASSPHRASE=%s\\nFREQ_BAND=%s\\nDAEMONIZE=1\\n" "$dev" "$dev" "$ssid" "$pwd" "$freq_band" > "$cap_conf"; ' +
+  '  chmod 600 "$cap_conf"; ' +
+  '  trap \'rm -rf "$cap_sec_dir"\' EXIT; ' +
+  '  pkexec create_ap --config "$cap_conf" >/dev/null 2>&1; ' +
   '  for i in {1..14}; do ' +
   '    sleep 0.5; ' +
   '    for d in /tmp/create_ap.*.conf.*; do ' +
@@ -534,11 +549,14 @@ var hotspotApplyScript =
   '  if ! nmcli connection show "$con" >/dev/null 2>&1; then ' +
   '    nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
   '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk 802-11-wireless-security.psk "$pwd" ' +
-  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1; ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk ' +
+  '      ipv4.method shared ${dev:+ifname "$dev"} >/dev/null 2>&1 || { echo "Failed to create hotspot connection" >&2; exit 1; }; ' +
   '  else ' +
-  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" ' +
-  '      802-11-wireless-security.psk "$pwd" 802-11-wireless.band "$band" >/dev/null 2>&1; ' +
+  '    nmcli con modify "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" >/dev/null 2>&1 || true; ' +
+  '  fi; ' +
+  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit "$con" >/dev/null 2>&1; then ' +
+  '    echo "Failed to configure hotspot password" >&2; ' +
+  '    exit 1; ' +
   '  fi; ' +
   '  if ! nmcli con up "$con" >/dev/null 2>&1; then ' +
   '    echo "Failed to start hotspot" >&2; ' +
@@ -546,8 +564,11 @@ var hotspotApplyScript =
   '  fi; ' +
   'fi'
 
+// The password arrives on stdin; argv is world-readable in /proc,
+// so secrets must never appear in command line arguments.
 var hotspotQrScript =
-  'ssid="$1"; pwd="$2"; ' +
+  'IFS= read -r pwd; ' +
+  'ssid="$1"; ' +
   'if [[ -z "$ssid" || -z "$pwd" ]]; then ' +
   '  con=""; ' +
   '  for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
