@@ -99,6 +99,21 @@ omarchy restart shell
 | `r` / `R` | Panel | Refresh network status and scan Wi-Fi |
 | `w` / `W` | Panel | Toggle Wi-Fi radio on or off |
 
+### Global Shortcut (`SUPER + CTRL + W`)
+
+To map `SUPER + CTRL + W` to open/close this panel (matching Omarchy's `SUPER + CTRL + B` for Bluetooth), add this override to `~/.config/hypr/bindings.lua`:
+
+```lua
+hl.unbind("SUPER + CTRL + W")
+o.bind("SUPER + CTRL + W", "Network", "omarchy-shell shell toggle community.network")
+```
+
+You can assign any custom keybinding to the shell toggle or use direct IPC actions:
+- `omarchy-shell shell toggle community.network` — Toggle panel open/close
+- `omarchy-shell community.network showHotspotQr` — Open centered Hotspot QR code overlay
+- `omarchy-shell community.network speedTest` — Open speed test overlay
+- `omarchy-shell community.network toggleNetwork` — Toggle Wi-Fi radio on/off
+
 ---
 
 ## Dependencies
