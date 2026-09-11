@@ -527,7 +527,7 @@ var hotspotApplyScript =
   '  freq_band="2.4"; if [[ "$band" == "a" ]]; then freq_band="5"; fi; ' +
   '  printf "WIFI_IFACE=%s\\nINTERNET_IFACE=%s\\nSSID=%s\\nPASSPHRASE=%s\\nFREQ_BAND=%s\\nDAEMONIZE=1\\n" "$dev" "$dev" "$ssid" "$pwd" "$freq_band" > "$cap_conf"; ' +
   '  chmod 600 "$cap_conf"; ' +
-  '  trap \'rm -rf "$cap_sec_dir"\' EXIT; ' +
+  '  trap \'rm -rf "$cap_sec_dir"\' EXIT HUP INT QUIT TERM; ' +
   '  pkexec create_ap --config "$cap_conf" >/dev/null 2>&1; ' +
   '  for i in {1..14}; do ' +
   '    sleep 0.5; ' +

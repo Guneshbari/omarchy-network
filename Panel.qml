@@ -879,6 +879,14 @@ Panel {
   function applyWired(method) {
     if (root.wiredBusy) return
     var targetMethod = method || root.wiredSelectedMethod
+    if (targetMethod === "manual") {
+      var addr = (root.wiredAddresses || "").trim()
+      if (!addr) {
+        root.wiredStatusMsg = "IP address is required for Static IP"
+        root.wiredStatusIsError = true
+        return
+      }
+    }
     root.wiredBusy = true
     root.wiredStatusMsg = "Applying..."
     root.wiredStatusIsError = false
@@ -909,7 +917,11 @@ Panel {
     var launcher = con
       ? ("omarchy-launch-tui --app-id=TUI.float nmtui edit " + Util.shellQuote(con))
       : "omarchy-launch-tui --app-id=TUI.float nmtui"
-    root.bar.run(launcher)
+    if (root.bar && typeof root.bar.run === "function") {
+      root.bar.run(launcher)
+    } else {
+      Quickshell.execDetached(["bash", "-c", launcher])
+    }
     root.close()
   }
 
@@ -965,13 +977,24 @@ Panel {
 
   function saveHotspot() {
     if (root.hotspotBusy) return
-    if (!root.hotspotDraftSsid) {
+    var draftSsid = (root.hotspotDraftSsid || "").trim()
+    if (!draftSsid) {
       root.hotspotStatusMsg = "SSID cannot be empty"
+      root.hotspotStatusIsError = true
+      return
+    }
+    if (draftSsid.length > 32) {
+      root.hotspotStatusMsg = "SSID cannot exceed 32 characters"
       root.hotspotStatusIsError = true
       return
     }
     if (root.hotspotDraftPassword.length < 8) {
       root.hotspotStatusMsg = "Password must be at least 8 characters"
+      root.hotspotStatusIsError = true
+      return
+    }
+    if (root.hotspotDraftPassword.length > 63) {
+      root.hotspotStatusMsg = "Password cannot exceed 63 characters"
       root.hotspotStatusIsError = true
       return
     }
@@ -983,7 +1006,7 @@ Panel {
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "save",
       root.hotspotName || "Hotspot",
-      root.hotspotDraftSsid,
+      draftSsid,
       root.hotspotDraftBand
     ]
     hotspotApplyProc.running = true
