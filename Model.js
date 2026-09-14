@@ -607,6 +607,33 @@ var hotspotQrScript =
   '  printf "%s\\n" "$row"; ' +
   'done <<<"$ascii"'
 
+// Pinned AUR package installer for linux-wifi-hotspot.
+// Binds to an immutable commit SHA and verifies the PKGBUILD checksum to prevent
+// arbitrary code execution from mutable upstream/AUR HEAD changes.
+var installRepeaterScript =
+  'if pacman -Q linux-wifi-hotspot >/dev/null 2>&1; then ' +
+  '  echo "linux-wifi-hotspot is already installed."; ' +
+  '  exit 0; ' +
+  'fi; ' +
+  'AUR_COMMIT="09f15942b495d89ef0f34abf2885f32d84f28025"; ' +
+  'EXPECTED_SHA="f2b08a066f7a35c08030d175be6a9959b3de2b50993026ac359fd3900cacfbef"; ' +
+  'BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/aur-lwh.XXXXXX"); ' +
+  'trap \'rm -rf "$BUILD_DIR"\' EXIT HUP INT QUIT TERM; ' +
+  'echo "==> Fetching linux-wifi-hotspot at pinned release ($AUR_COMMIT)..."; ' +
+  'git clone -q https://aur.archlinux.org/linux-wifi-hotspot.git "$BUILD_DIR" || { echo "Failed to clone AUR repository" >&2; exit 1; }; ' +
+  'cd "$BUILD_DIR"; ' +
+  'echo "==> Checking out immutable commit..."; ' +
+  'git checkout -q "$AUR_COMMIT" || { echo "Failed to checkout commit $AUR_COMMIT" >&2; exit 1; }; ' +
+  'if [ "$(git rev-parse HEAD)" != "$AUR_COMMIT" ]; then ' +
+  '  echo "Error: Commit SHA mismatch (expected $AUR_COMMIT)" >&2; exit 1; ' +
+  'fi; ' +
+  'echo "==> Verifying PKGBUILD checksum..."; ' +
+  'if ! echo "$EXPECTED_SHA  PKGBUILD" | sha256sum -c --status -; then ' +
+  '  echo "Error: PKGBUILD checksum verification failed!" >&2; exit 1; ' +
+  'fi; ' +
+  'echo "==> Building and installing verified package..."; ' +
+  'makepkg -si --needed --noconfirm'
+
 function parseQrMatrix(raw) {
   var lines = String(raw || "").trim().split(/\r?\n/).filter(function(line) { return line !== "" })
   if (lines.length === 0) return { rows: [], size: 0 }
@@ -620,6 +647,7 @@ function parseQrMatrix(raw) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    installRepeaterScript: installRepeaterScript,
     hotspotQrScript: hotspotQrScript,
     parseQrMatrix: parseQrMatrix,
     parseNetworkStatus: parseNetworkStatus,

@@ -1034,14 +1034,7 @@ Panel {
 
   function installLinuxWifiHotspot() {
     root.close()
-    var cmd = "if pacman -Q linux-wifi-hotspot >/dev/null 2>&1; then " +
-              "  yay -S --needed --cleanafter linux-wifi-hotspot; " +
-              "elif command -v omarchy >/dev/null 2>&1; then " +
-              "  omarchy pkg aur add linux-wifi-hotspot || yay -S --needed linux-wifi-hotspot; " +
-              "else " +
-              "  yay -S --needed linux-wifi-hotspot; " +
-              "fi"
-    var launcher = "omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(cmd)
+    var launcher = "omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(Model.installRepeaterScript)
     if (root.bar && typeof root.bar.run === "function") {
       root.bar.run(launcher)
     } else {
