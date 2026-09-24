@@ -129,6 +129,15 @@ You can assign any custom keybinding to the shell toggle or use direct IPC actio
 
 ---
 
+## Security & Privilege Model
+
+- **Safe Credential Handling**: Wi-Fi keys, 802.1X passwords, and hotspot passphrases are never passed through process arguments (`argv`), `/proc/<pid>/cmdline`, or shell string interpolation. Credentials reach `nmcli` and `create_ap` through private UNIX stdin streams or restricted `0600` configuration files within `0700` temporary directories. Application-level state is promptly unreferenced upon action completion.
+- **Privilege Boundaries**: PolicyKit-assisted operations (`pkexec create_ap`) enforce root ownership (`UID 0`) and reject symlinks on all temporary state directories, configuration files, and target process IDs.
+- **Supply-Chain Integrity**: The 1-click `linux-wifi-hotspot` AUR installer checks out a pinned immutable Git commit SHA (`09f15942b495d89ef0f34abf2885f32d84f28025`) and validates cryptographic SHA-256 checksums of both `PKGBUILD` and `linux-wifi-hotspot.install` before initiating package builds in a private `0700` directory.
+- **Strict Boundary Validation**: IPv4 addresses, gateways, and DNS inputs undergo mathematical octet range (`0..255`) and prefix length (`0..32`) validation at both the QML UI and shell script execution layers. State queries use literal string matching (`grep -F -x`) and RFC 4122 UUID lookups to prevent delimiter or regular expression injection.
+
+---
+
 ## Uninstallation
 
 To disable and remove the plugin:

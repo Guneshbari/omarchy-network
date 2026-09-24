@@ -21,6 +21,7 @@ Panel {
   function close() {
     root.controller.hide()
     cancelPasswordPrompt()
+    if (hotspotEditing) cancelHotspotEdit()
   }
 
   function cancelPasswordPrompt() {
@@ -129,9 +130,12 @@ Panel {
   property bool hotspotActive: false
   property string hotspotDevice: ""
   property int hotspotClients: 0
+  property var hotspotClientList: []
   property bool hotspotIsRepeater: false
   property bool hotspotHasCreateAp: false
   property bool hotspotWifiConnected: false
+  property string hotspotConnectedBand: ""
+  property bool hotspotEthernetConnected: false
   property bool hotspotRepeaterCapable: false
   property bool hotspotBusy: false
   property bool hotspotPasswordVisible: false
@@ -279,6 +283,8 @@ Panel {
     function showHotspotQr() { root.summonHotspotQr() }
     function dismissHotspotQr() { root.dismissHotspotQr() }
     function speedTest() { root.summonSpeedTest() }
+    function editHotspot() { root.open(); root.openHotspotEdit() }
+    function toggleHotspot() { root.toggleHotspot() }
   }
 
   IpcHandler {
@@ -294,6 +300,8 @@ Panel {
     function showHotspotQr() { root.summonHotspotQr() }
     function dismissHotspotQr() { root.dismissHotspotQr() }
     function speedTest() { root.summonSpeedTest() }
+    function editHotspot() { root.open(); root.openHotspotEdit() }
+    function toggleHotspot() { root.toggleHotspot() }
   }
 
   function activateHeader() {
@@ -573,18 +581,49 @@ Panel {
     connectDirectly(net.ssid)
   }
 
-  // Bar pill state, derived from the native NetworkManager service so the
-  // icon reflects connection changes without polling. Wired is preferred
-  // when both are up, matching the default-route device.
+  // Bar pill state, derived from the native NetworkManager service and active
+  // route status so the icon accurately reflects connection changes and avoids
+  // false ethernet identification when Wi-Fi is active.
   readonly property var wiredDevice: findDevice(DeviceType.Wired)
+  readonly property bool isWifiConnected: !!(
+    (connectedWifiNetwork && connectedWifiNetwork.connected) ||
+    (wifiDevice && wifiDevice.connected) ||
+    (info && info.type === "wifi")
+  )
+  readonly property bool isWiredConnected: !!(
+    wiredDevice && wiredDevice.connected
+  )
+
   readonly property string kind: {
-    if (wiredDevice && wiredDevice.connected) return "ethernet"
-    if (connectedWifiNetwork) return "wifi"
-    return "disconnected"
+    if (isWifiConnected && !isWiredConnected) return "wifi"
+    if (isWiredConnected && !isWifiConnected) return "ethernet"
+    if (!isWifiConnected && !isWiredConnected) return "disconnected"
+
+    // Both are connected: use the active default route from omarchy-network-status
+    if (info && info.type === "wifi") return "wifi"
+    if (info && info.type === "ethernet") return "ethernet"
+
+    // Fallback when route info is not yet populated: wired is preferred
+    return "ethernet"
   }
-  readonly property int signalStrength: connectedWifiNetwork
-    ? Math.round((connectedWifiNetwork.signalStrength || 0) * 100)
-    : -1
+
+  readonly property int signalStrength: {
+    if (connectedWifiNetwork && connectedWifiNetwork.signalStrength !== undefined && connectedWifiNetwork.signalStrength >= 0) {
+      return Math.round(connectedWifiNetwork.signalStrength * 100)
+    }
+    if (info && info.signal !== undefined) {
+      var s = parseInt(info.signal, 10)
+      if (!isNaN(s) && s >= 0) return s
+    }
+    return -1
+  }
+
+  onIsWifiConnectedChanged: {
+    if (!detailsProc.running) detailsProc.running = true
+  }
+  onIsWiredConnectedChanged: {
+    if (!detailsProc.running) detailsProc.running = true
+  }
 
   Process {
     id: clipboardProc
@@ -596,6 +635,7 @@ Panel {
       write(textToCopy)
       textToCopy = ""
     }
+    onExited: textToCopy = ""
   }
 
   function copyToClipboard(value, sensitive) {
@@ -633,7 +673,7 @@ Panel {
     if (scanWifi === undefined) scanWifi = false
     if (!detailsProc.running) detailsProc.running = true
     if (!dnsProc.running) {
-      dnsProc.command = ["bash", "-c", root.dnsCommand("")]
+      dnsProc.command = ["omarchy-dns"]
       dnsProc.running = true
     }
     if (!bandProc.running) {
@@ -732,15 +772,33 @@ Panel {
     return Model.formatPacketLoss(percent, hasInternetPing)
   }
 
+  function isPhysicalWired(device) {
+    if (!device || !device.name) return false
+    var name = String(device.name)
+    // Filter out virtual, container, bridge, and tunnel interfaces
+    if (name.startsWith("veth") || name.startsWith("docker") ||
+        name.startsWith("br-") || name.startsWith("virbr") ||
+        name.startsWith("dummy") || name.startsWith("lo") ||
+        name.startsWith("tap") || name.startsWith("tun") ||
+        name.startsWith("tailscale") || name.startsWith("wg") ||
+        name.startsWith("zt")) {
+      return false
+    }
+    if (device.nmManaged === false) return false
+    return name.startsWith("en") || name.startsWith("eth")
+  }
+
   // Prefer a connected device: a machine can expose several NICs of the
   // same type (e.g. an idle onboard port alongside the active adapter),
-  // and the first-enumerated one may be carrierless.
+  // and the first-enumerated one may be carrierless. Virtual ethernet
+  // devices (veth, bridges, docker) are strictly filtered out for Wired.
   function findDevice(type) {
     var devices = networkDevices || []
     var fallback = null
     for (var i = 0; i < devices.length; i++) {
       var device = devices[i]
       if (!device || device.type !== type) continue
+      if (type === DeviceType.Wired && !isPhysicalWired(device)) continue
       if (device.connected) return device
       if (!fallback) fallback = device
     }
@@ -834,17 +892,21 @@ Panel {
   }
 
   function setDns(provider) {
-    if (!root.bar || !provider || actionProc.running) return
+    if (!provider || actionProc.running) return
 
     if (provider === "Custom") {
-      var launcher = "omarchy-launch-floating-terminal-with-presentation"
-      root.bar.run(launcher + " " + Util.shellQuote(root.dnsCommand(provider)))
+      var cmd = root.dnsCommand(provider)
+      if (root.bar && typeof root.bar.run === "function") {
+        root.bar.run("omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(cmd))
+      } else {
+        Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
+      }
       root.close()
       return
     }
 
     root.pendingDnsProvider = provider
-    actionProc.command = ["bash", "-c", root.dnsCommand(provider)]
+    actionProc.command = ["omarchy-dns", provider]
     actionProc.running = true
     root.close()
   }
@@ -876,6 +938,32 @@ Panel {
     }
   }
 
+  function isValidIpv4(ip) {
+    if (!ip || typeof ip !== "string") return false
+    var parts = ip.split(".")
+    if (parts.length !== 4) return false
+    for (var i = 0; i < 4; i++) {
+      if (!/^\d+$/.test(parts[i])) return false
+      var num = parseInt(parts[i], 10)
+      if (num < 0 || num > 255 || (parts[i].length > 1 && parts[i][0] === "0")) return false
+    }
+    return true
+  }
+
+  function isValidIpv4Cidr(str) {
+    if (!str || typeof str !== "string") return false
+    var slashIdx = str.indexOf("/")
+    if (slashIdx === -1) {
+      return root.isValidIpv4(str)
+    }
+    var ip = str.substring(0, slashIdx)
+    var prefix = str.substring(slashIdx + 1)
+    if (!root.isValidIpv4(ip)) return false
+    if (!/^\d+$/.test(prefix)) return false
+    var p = parseInt(prefix, 10)
+    return p >= 0 && p <= 32
+  }
+
   function applyWired(method) {
     if (root.wiredBusy) return
     var targetMethod = method || root.wiredSelectedMethod
@@ -885,6 +973,33 @@ Panel {
         root.wiredStatusMsg = "IP address is required for Static IP"
         root.wiredStatusIsError = true
         return
+      }
+      var addrs = addr.split(/[,\s]+/)
+      for (var i = 0; i < addrs.length; i++) {
+        if (!addrs[i]) continue
+        if (!root.isValidIpv4Cidr(addrs[i])) {
+          root.wiredStatusMsg = "Invalid IP address: " + addrs[i]
+          root.wiredStatusIsError = true
+          return
+        }
+      }
+      var gw = (root.wiredGateway || "").trim()
+      if (gw && !root.isValidIpv4(gw)) {
+        root.wiredStatusMsg = "Invalid Gateway IP address: " + gw
+        root.wiredStatusIsError = true
+        return
+      }
+      var dns = (root.wiredDns || "").trim()
+      if (dns) {
+        var dnsList = dns.split(/[,\s]+/)
+        for (var j = 0; j < dnsList.length; j++) {
+          if (!dnsList[j]) continue
+          if (!root.isValidIpv4(dnsList[j])) {
+            root.wiredStatusMsg = "Invalid DNS IP address: " + dnsList[j]
+            root.wiredStatusIsError = true
+            return
+          }
+        }
       }
     }
     root.wiredBusy = true
@@ -914,13 +1029,20 @@ Panel {
 
   function openNmtui() {
     var con = root.wiredConnectionName || "Wired connection 1"
-    var launcher = con
-      ? ("omarchy-launch-tui --app-id=TUI.float nmtui edit " + Util.shellQuote(con))
-      : "omarchy-launch-tui --app-id=TUI.float nmtui"
+    if (typeof con === "string" && con.startsWith("-")) {
+      con = "Wired connection 1"
+    }
     if (root.bar && typeof root.bar.run === "function") {
+      var launcher = con
+        ? ("omarchy-launch-tui --app-id=TUI.float nmtui edit " + Util.shellQuote(con))
+        : "omarchy-launch-tui --app-id=TUI.float nmtui"
       root.bar.run(launcher)
     } else {
-      Quickshell.execDetached(["bash", "-c", launcher])
+      var args = ["omarchy-launch-tui", "--app-id=TUI.float", "nmtui"]
+      if (con) {
+        args.push("edit", con)
+      }
+      Quickshell.execDetached(args)
     }
     root.close()
   }
@@ -937,14 +1059,27 @@ Panel {
         root.hotspotActive = !!data.active
         root.hotspotDevice = data.device || ""
         root.hotspotClients = data.clients || 0
+        root.hotspotClientList = Array.isArray(data.clientList) ? data.clientList : []
         root.hotspotIsRepeater = !!data.isRepeater
         root.hotspotHasCreateAp = !!data.hasCreateAp
         root.hotspotWifiConnected = !!data.wifiConnected
+        root.hotspotEthernetConnected = !!data.ethernetConnected
         root.hotspotRepeaterCapable = !!data.repeaterCapable
+        root.hotspotConnectedBand = data.connectedBand || ""
+        if (data.active && root.hotspotStatusIsError) {
+          root.hotspotStatusMsg = ""
+          root.hotspotStatusIsError = false
+        }
         if (!root.hotspotEditing) {
           root.hotspotDraftSsid = root.hotspotSsid
           root.hotspotDraftPassword = root.hotspotPassword
-          root.hotspotDraftBand = root.hotspotBand
+          if (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand) {
+            root.hotspotDraftBand = root.hotspotConnectedBand
+          } else {
+            root.hotspotDraftBand = root.hotspotBand
+          }
+        } else if (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand) {
+          root.hotspotDraftBand = root.hotspotConnectedBand
         }
       }
     } catch (e) {}
@@ -962,15 +1097,18 @@ Panel {
     root.hotspotBusy = true
     root.hotspotStatusMsg = root.hotspotActive
       ? "Stopping hotspot..."
-      : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Starting Wi-Fi repeater..." : "Starting hotspot...")
+      : (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Starting Wi-Fi repeater..." : "Starting hotspot...")
     root.hotspotStatusIsError = false
     hotspotApplyProc.secret = root.hotspotPassword || "omarchy12345"
+    var effectiveBand = (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
+      ? root.hotspotConnectedBand
+      : (root.hotspotBand || "bg")
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "toggle",
       root.hotspotName || "Hotspot",
       root.hotspotSsid || "Omarchy-Hotspot",
-      root.hotspotBand || "bg"
+      effectiveBand
     ]
     hotspotApplyProc.running = true
   }
@@ -988,6 +1126,11 @@ Panel {
       root.hotspotStatusIsError = true
       return
     }
+    if (/[\r\n]/.test(draftSsid)) {
+      root.hotspotStatusMsg = "SSID cannot contain line breaks"
+      root.hotspotStatusIsError = true
+      return
+    }
     if (root.hotspotDraftPassword.length < 8) {
       root.hotspotStatusMsg = "Password must be at least 8 characters"
       root.hotspotStatusIsError = true
@@ -998,16 +1141,29 @@ Panel {
       root.hotspotStatusIsError = true
       return
     }
+    if (/[\r\n]/.test(root.hotspotDraftPassword)) {
+      root.hotspotStatusMsg = "Password cannot contain line breaks"
+      root.hotspotStatusIsError = true
+      return
+    }
+    if (!/^[\x20-\x7E]+$/.test(root.hotspotDraftPassword)) {
+      root.hotspotStatusMsg = "Password must contain only printable characters"
+      root.hotspotStatusIsError = true
+      return
+    }
     root.hotspotBusy = true
     root.hotspotStatusMsg = "Saving..."
     root.hotspotStatusIsError = false
+    var effectiveBand = (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
+      ? root.hotspotConnectedBand
+      : root.hotspotDraftBand
     hotspotApplyProc.secret = root.hotspotDraftPassword || root.hotspotPassword || "omarchy12345"
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "save",
       root.hotspotName || "Hotspot",
       draftSsid,
-      root.hotspotDraftBand
+      effectiveBand
     ]
     hotspotApplyProc.running = true
   }
@@ -1015,7 +1171,11 @@ Panel {
   function openHotspotEdit() {
     root.hotspotDraftSsid = root.hotspotSsid
     root.hotspotDraftPassword = root.hotspotPassword
-    root.hotspotDraftBand = root.hotspotBand
+    if (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand) {
+      root.hotspotDraftBand = root.hotspotConnectedBand
+    } else {
+      root.hotspotDraftBand = root.hotspotBand
+    }
     root.hotspotEditing = true
     root.hotspotStatusMsg = ""
     root.hotspotStatusIsError = false
@@ -1034,11 +1194,11 @@ Panel {
 
   function installLinuxWifiHotspot() {
     root.close()
-    var launcher = "omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(Model.installRepeaterScript)
     if (root.bar && typeof root.bar.run === "function") {
+      var launcher = "omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(Model.installRepeaterScript)
       root.bar.run(launcher)
     } else {
-      Quickshell.execDetached(["bash", "-c", launcher])
+      Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", Model.installRepeaterScript])
     }
   }
 
@@ -1062,6 +1222,8 @@ Panel {
     root.hotspotOverlayPasswordVisible = false
     root.hotspotPasswordCopied = false
     root.hotspotExpectedStop = true
+    root.hotspotQrRows = []
+    root.hotspotQrSize = 0
     if (hotspotQrProc.running) {
       hotspotQrProc.running = false
     }
@@ -1189,10 +1351,15 @@ Panel {
   }
 
   function connectEnterprise(ssid, identity, passphrase) {
+    if (!ssid || /[\r\n]/.test(ssid)) return
+    if (!identity || /[\r\n]/.test(identity)) return
+    if (!passphrase || /[\r\n]/.test(passphrase)) return
     runNetworkAction("connect", networkForSsid(ssid), function(network) {
       enterpriseConnect.secret = passphrase
       enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity]
       enterpriseConnect.running = true
+      root.passwordText = ""
+      root.identityText = ""
     })
   }
 
@@ -1205,6 +1372,12 @@ Panel {
     onStarted: {
       write(secret + "\n")
       secret = ""
+    }
+    onExited: function(exitCode) {
+      secret = ""
+      if (exitCode !== 0) {
+        root.failNetworkAction(root.networkForSsid(root.actionSsid), connectionFailReasons.WifiClientFailed)
+      }
     }
   }
 
@@ -1261,6 +1434,7 @@ Panel {
 
   Process {
     id: dnsProc
+    command: ["omarchy-dns"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateDns(text)
@@ -1421,6 +1595,7 @@ Panel {
       }
     }
     onExited: function(exitCode) {
+      secret = ""
       root.hotspotQrLoading = false
       if (root.hotspotExpectedStop) return
       if (exitCode !== 0) {
@@ -1797,7 +1972,7 @@ Panel {
             iconText: root.hotspotActive && root.hotspotIsRepeater ? "󰤨" : "󱛇"
             tooltipText: root.hotspotActive
               ? ((root.hotspotIsRepeater ? "Repeater Active (" : "Hotspot Active (") + root.hotspotClients + " connected) - Click to Stop")
-              : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Start Wi-Fi Repeater" : "Start Wi-Fi Hotspot")
+              : (root.hotspotEthernetConnected ? "Start Wi-Fi Hotspot (shares Ethernet)" : (root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Start Wi-Fi Repeater" : "Start Wi-Fi Hotspot"))
             foreground: root.hotspotActive ? Color.accent : root.bar.foreground
             fontFamily: root.bar.fontFamily
             iconSize: Style.font.subtitle * 1.5
@@ -2171,9 +2346,11 @@ Panel {
                 visible: hotspotSwitch.containsMouse
                 text: {
                   if (root.hotspotActive) return "Stop Wi-Fi Hotspot"
+                  if (root.hotspotEthernetConnected) return "Start Wi-Fi Hotspot (shares Ethernet)"
                   if (root.hotspotWifiConnected && root.hotspotHasCreateAp) {
+                    var bandName = root.hotspotConnectedBand === "a" ? "5 GHz" : (root.hotspotConnectedBand === "bg" ? "2.4 GHz" : "")
                     return root.hotspotRepeaterCapable
-                      ? "Start Wi-Fi Repeater (keep Wi-Fi connected)"
+                      ? ("Start Wi-Fi Repeater (" + (bandName ? bandName + ", " : "") + "keep Wi-Fi connected)")
                       : "Cannot repeat restricted 5GHz channel"
                   }
                   return "Start Wi-Fi Hotspot"
@@ -2191,15 +2368,20 @@ Panel {
             if (root.hotspotActive) {
               return root.hotspotIsRepeater
                 ? "󰤨 Repeating active Wi-Fi without disconnecting"
-                : "󱛇 Broadcasting standalone Wi-Fi hotspot"
+                : (root.hotspotEthernetConnected ? "󱛇 Sharing Ethernet connection via Wi-Fi hotspot" : "󱛇 Broadcasting standalone Wi-Fi hotspot")
+            }
+            if (root.hotspotEthernetConnected) {
+              return "󱛇 Ethernet connected · Wi-Fi hotspot will share wired Internet"
             }
             if (root.hotspotWifiConnected) {
               if (!root.hotspotHasCreateAp) {
                 return "󰤮 Simultaneous Wi-Fi repeater requires linux-wifi-hotspot"
               }
+              var bandName = root.hotspotConnectedBand === "a" ? "5 GHz" : (root.hotspotConnectedBand === "bg" ? "2.4 GHz" : "")
+              var bandSuffix = bandName !== "" ? " (" + bandName + ")" : ""
               return root.hotspotRepeaterCapable
-                ? "󰤨 Repeater ready · Shares active Wi-Fi without disconnecting"
-                : "󰤩 5GHz channel restricted (no-IR) · Connect to 2.4GHz Wi-Fi to repeat"
+                ? "󰤨 Repeater ready" + bandSuffix + " · Shares active Wi-Fi without disconnecting"
+                : "󰤩 Channel restricted (no-IR) on active Wi-Fi · Connect to 2.4GHz Wi-Fi to repeat"
             }
             return root.hotspotHasCreateAp ? "Standard Wi-Fi Access Point" : "Standard Wi-Fi AP (Install linux-wifi-hotspot for repeater)"
           }
@@ -2260,7 +2442,10 @@ Panel {
               spacing: Style.space(2)
 
               Text {
-                text: "PASSWORD (" + (root.hotspotBand === "a" ? "5GHz" : "2.4GHz") + ")"
+                readonly property string activeBand: (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
+                  ? (root.hotspotConnectedBand === "a" ? "5 GHz" : "2.4 GHz")
+                  : (root.hotspotBand === "a" ? "5 GHz" : "2.4 GHz")
+                text: "PASSWORD (" + activeBand + ")"
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
@@ -2374,6 +2559,180 @@ Panel {
               onClicked: root.installLinuxWifiHotspot()
             }
           }
+
+          // Connected Devices Section
+          Column {
+            visible: root.hotspotActive
+            width: parent.width
+            spacing: Style.space(4)
+
+            RowLayout {
+              width: parent.width
+
+              Text {
+                text: "CONNECTED DEVICES (" + root.hotspotClients + ")"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                Layout.alignment: Qt.AlignVCenter
+              }
+
+              Item { Layout.fillWidth: true }
+
+              Text {
+                visible: root.hotspotClients > 0
+                text: root.hotspotClients === 1 ? "1 device" : (root.hotspotClients + " devices")
+                color: Color.accent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                Layout.alignment: Qt.AlignVCenter
+              }
+            }
+
+            // Empty state placeholder
+            Rectangle {
+              visible: root.hotspotClients === 0
+              width: parent.width
+              height: Style.space(28)
+              color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.03)
+              radius: Style.cornerRadius
+              border.width: 1
+              border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.06)
+
+              Row {
+                anchors.centerIn: parent
+                spacing: Style.space(6)
+
+                Text {
+                  text: "󰤮"
+                  color: Qt.darker(root.bar.foreground, 2.0)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: "Waiting for devices to connect..."
+                  color: Qt.darker(root.bar.foreground, 1.8)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+            }
+
+            // Client items
+            Repeater {
+              model: root.hotspotClientList
+
+              Rectangle {
+                width: parent.width
+                height: clientRow.implicitHeight + Style.space(12)
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.04)
+                radius: Style.cornerRadius
+                border.width: 1
+                border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+
+                RowLayout {
+                  id: clientRow
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(8)
+
+                  // Device Icon
+                  Text {
+                    text: {
+                      var n = (modelData.name || "").toLowerCase()
+                      var v = (modelData.vendor || "").toLowerCase()
+                      if (n.indexOf("phone") !== -1 || n.indexOf("iphone") !== -1 || n.indexOf("android") !== -1 ||
+                          v.indexOf("apple") !== -1 || v.indexOf("samsung") !== -1 || v.indexOf("xiaomi") !== -1 || v.indexOf("huawei") !== -1) {
+                        return "󰄡"
+                      }
+                      if (n.indexOf("pc") !== -1 || n.indexOf("laptop") !== -1 || v.indexOf("intel") !== -1 || v.indexOf("dell") !== -1 || v.indexOf("lenovo") !== -1) {
+                        return "󰌹"
+                      }
+                      return "󰛇"
+                    }
+                    color: Color.accent
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.subtitle
+                    Layout.alignment: Qt.AlignVCenter
+                  }
+
+                  // Device Info: Name, IP, MAC
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+
+                    Text {
+                      text: modelData.name || modelData.ip || modelData.mac
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
+
+                    Text {
+                      text: (modelData.ip ? (modelData.ip + "  ·  ") : "") + modelData.mac
+                      color: Qt.darker(root.bar.foreground, 1.5)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
+                  }
+
+                  // Signal & Speed
+                  ColumnLayout {
+                    spacing: 1
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+
+                    Row {
+                      spacing: Style.space(4)
+                      Layout.alignment: Qt.AlignRight
+
+                      Text {
+                        text: {
+                          var s = modelData.signal
+                          if (s === null || s === undefined) return "󰤨"
+                          if (s >= -55) return "󰤨"
+                          if (s >= -65) return "󰤥"
+                          if (s >= -75) return "󰤢"
+                          return "󰤟"
+                        }
+                        color: Color.accent
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Text {
+                        text: (modelData.signal !== null && modelData.signal !== undefined) ? (modelData.signal + " dBm") : ""
+                        color: Qt.darker(root.bar.foreground, 1.3)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+                    }
+
+                    Text {
+                      visible: !!(modelData.txBitrate || modelData.connectedTime)
+                      text: modelData.txBitrate ? modelData.txBitrate : (modelData.connectedTime ? ("up " + modelData.connectedTime) : "")
+                      color: Qt.darker(root.bar.foreground, 1.6)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      Layout.alignment: Qt.AlignRight
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
 
         // When EDITING: Form Fields + Save/Cancel Buttons
@@ -2471,37 +2830,77 @@ Panel {
 
           // Band selection row
           Row {
+            id: hotspotBandRow
             width: parent.width
             spacing: Style.space(6)
 
             readonly property real cellWidth: (width - spacing) / 2
+            readonly property bool isBandLocked: !root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand !== ""
+            readonly property string lockedBandName: root.hotspotConnectedBand === "a" ? "5 GHz" : "2.4 GHz"
 
             Button {
               width: parent.cellWidth
               text: "2.4 GHz"
-              tooltipText: "2.4 GHz band (maximum compatibility)"
+              tooltipText: hotspotBandRow.isBandLocked && root.hotspotConnectedBand !== "bg"
+                ? "Locked: Single-radio card must mirror your active " + hotspotBandRow.lockedBandName + " Wi-Fi connection"
+                : "2.4 GHz band (maximum compatibility)"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               horizontalPadding: Style.spacing.controlPaddingX
               verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
               bordered: true
+              enabled: !hotspotBandRow.isBandLocked || root.hotspotConnectedBand === "bg"
+              opacity: enabled ? 1.0 : 0.45
               active: root.hotspotDraftBand === "bg"
-              onClicked: root.hotspotDraftBand = "bg"
+              onClicked: {
+                if (enabled) root.hotspotDraftBand = "bg"
+              }
             }
 
             Button {
               width: parent.cellWidth
               text: "5 GHz"
-              tooltipText: "5 GHz band (faster throughput)"
+              tooltipText: hotspotBandRow.isBandLocked && root.hotspotConnectedBand !== "a"
+                ? "Locked: Single-radio card must mirror your active " + hotspotBandRow.lockedBandName + " Wi-Fi connection"
+                : "5 GHz band (faster throughput)"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               horizontalPadding: Style.spacing.controlPaddingX
               verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
               bordered: true
+              enabled: !hotspotBandRow.isBandLocked || root.hotspotConnectedBand === "a"
+              opacity: enabled ? 1.0 : 0.45
               active: root.hotspotDraftBand === "a"
-              onClicked: root.hotspotDraftBand = "a"
+              onClicked: {
+                if (enabled) root.hotspotDraftBand = "a"
+              }
+            }
+          }
+
+          // Band lock constraint hint
+          Row {
+            visible: !root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              text: "󰤨"
+              color: Color.accent
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              width: parent.width - Style.space(18)
+              wrapMode: Text.WordWrap
+              text: "Locked to " + (root.hotspotConnectedBand === "a" ? "5 GHz" : "2.4 GHz") + " · Single-radio repeaters must mirror your active Wi-Fi band."
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.verticalCenter: parent.verticalCenter
             }
           }
 
@@ -3158,7 +3557,11 @@ Panel {
 
     function submitCredentials() {
       if (!net || root.busy || root.passwordText.length === 0) return
-      if (!isEnterprise) return root.connectWithPassphrase(net.ssid, root.passwordText)
+      if (!isEnterprise) {
+        root.connectWithPassphrase(net.ssid, root.passwordText)
+        root.passwordText = ""
+        return
+      }
       if (root.identityText.length > 0) root.connectEnterprise(net.ssid, root.identityText, root.passwordText)
     }
 

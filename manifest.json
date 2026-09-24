@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "community.network",
   "name": "Network Manager (with Repeater & Hotspot)",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Gunesh Bari",
   "license": "MIT",
   "description": "Complete network manager for Omarchy featuring Wi-Fi, simultaneous Wi-Fi Repeater chaining & Hotspot AP with centered QR sharing, 1-click linux-wifi-hotspot installer, DNS selection, and interactive Wired Ethernet configuration (DHCP & Static IP) with full keyboard navigation.",
