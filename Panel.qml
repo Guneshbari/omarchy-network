@@ -192,8 +192,23 @@ Panel {
   readonly property int qrHeaderIndex: canShareWifi ? 0 : -1
   readonly property int speedHeaderIndex: canRunSpeedTest ? (canShareWifi ? 1 : 0) : -1
   readonly property int hotspotHeaderIndex: hasHotspotSupport ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) : -1
-  readonly property int toggleHeaderIndex: canToggleWifi ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) : -1
-  readonly property int headerActionCount: (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) + (canToggleWifi ? 1 : 0)
+  readonly property bool hasExtras: hasHotspotSupport || hasWired
+  property bool extrasOpen: false
+
+  PersistentProperties {
+    id: persisted
+    reloadableId: "community-network"
+    property bool extrasPinned: false
+  }
+  // Open the side panel on the left when the widget is on the right of the screen
+  readonly property bool sideOnLeft: panel.screenW > 0
+    && panel.anchorScreenPos.x + panel.anchorW / 2 > panel.screenW * 2 / 3
+  readonly property bool hotspotShown: hasHotspotSupport && extrasOpen
+  readonly property bool wiredShown: hasWired && extrasOpen
+  readonly property int extrasHeaderIndex: hasExtras ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) : -1
+  readonly property int toggleHeaderIndex: canToggleWifi ? (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) + (hasExtras ? 1 : 0) : -1
+  readonly property int headerActionCount: (canShareWifi ? 1 : 0) + (canRunSpeedTest ? 1 : 0) + (hasHotspotSupport ? 1 : 0) + (hasExtras ? 1 : 0) + (canToggleWifi ? 1 : 0)
+  readonly property bool extrasHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === extrasHeaderIndex
   readonly property bool qrHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === qrHeaderIndex
   readonly property bool speedHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === speedHeaderIndex
   readonly property bool hotspotHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === hotspotHeaderIndex
@@ -283,7 +298,7 @@ Panel {
     function showHotspotQr() { root.summonHotspotQr() }
     function dismissHotspotQr() { root.dismissHotspotQr() }
     function speedTest() { root.summonSpeedTest() }
-    function editHotspot() { root.open(); root.openHotspotEdit() }
+    function editHotspot() { root.open(); root.extrasOpen = true; root.openHotspotEdit() }
     function toggleHotspot() { root.toggleHotspot() }
   }
 
@@ -310,7 +325,8 @@ Panel {
       else if (root.hotspotActive) summonHotspotQr()
     }
     else if (headerIndex === speedHeaderIndex) summonSpeedTest()
-    else if (headerIndex === hotspotHeaderIndex) toggleHotspot()
+    else if (headerIndex === hotspotHeaderIndex) extrasOpen = !extrasOpen
+    else if (headerIndex === extrasHeaderIndex) extrasOpen = !extrasOpen
     else if (headerIndex === toggleHeaderIndex) toggleNetwork()
   }
 
@@ -461,6 +477,7 @@ Panel {
   // KeyboardPanel primes layer-shell focus whenever the panel opens. That's
   // what makes the SUPER+CTRL+W keybind land here with navigation ready.
   onOpenedChanged: {
+    extrasOpen = opened && persisted.extrasPinned
     if (opened) {
       refresh(true)
       selectedIndex = wifiNetworks.length > 0 ? 0 : -1
@@ -1711,8 +1728,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    contentWidth: panel.fittedContentWidth(root.extrasOpen ? Style.space(784) : Style.space(380))
+    contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight, root.extrasOpen ? sideColumn.implicitHeight : 0))
 
     // Catches all unhandled keys for keyboard navigation. AfterItem priority
     // lets the passphrase TextField (a child via focus chain) get its keys
@@ -1736,10 +1753,10 @@ Panel {
               if (root.canSelectBand) {
                 root.focusSection = "band"
                 root.bandAutoFocused = true
-              } else if (root.hasHotspotSupport) {
+              } else if (root.hotspotShown) {
                 root.focusSection = "hotspot"
                 root.hotspotRow = 0
-              } else if (root.hasWired) {
+              } else if (root.wiredShown) {
                 root.focusSection = "wired"
                 root.wiredRow = 0
               } else {
@@ -1756,10 +1773,10 @@ Panel {
               }
             } else if (root.bandAutoFocused && root.bandPillsVisible) {
               root.bandAutoFocused = false
-            } else if (root.hasHotspotSupport) {
+            } else if (root.hotspotShown) {
               root.focusSection = "hotspot"
               root.hotspotRow = 0
-            } else if (root.hasWired) {
+            } else if (root.wiredShown) {
               root.focusSection = "wired"
               root.wiredRow = 0
             } else {
@@ -1780,7 +1797,7 @@ Panel {
               if (root.hotspotRow === 0) {
                 root.hotspotRow = 1
                 root.hotspotActionIndex = 0
-              } else if (root.hasWired) {
+              } else if (root.wiredShown) {
                 root.focusSection = "wired"
                 root.wiredRow = 0
               } else {
@@ -1799,7 +1816,7 @@ Panel {
               } else if (root.wiredRow === 1) {
                 root.wiredRow = 0
               } else {
-                if (root.hasHotspotSupport) {
+                if (root.hotspotShown) {
                   root.focusSection = "hotspot"
                   root.hotspotRow = 1
                   root.hotspotActionIndex = 0
@@ -1830,7 +1847,7 @@ Panel {
             }
           } else if (root.focusSection === "dns") {
             if (dy < 0) {
-              if (root.hasWired) {
+              if (root.wiredShown) {
                 root.focusSection = "wired"
                 if (root.wiredSelectedMethod === "manual") {
                   root.wiredRow = 2
@@ -1839,7 +1856,7 @@ Panel {
                   root.wiredRow = 1
                   root.wiredIndex = 0
                 }
-              } else if (root.hasHotspotSupport) {
+              } else if (root.hotspotShown) {
                 root.focusSection = "hotspot"
                 root.hotspotRow = 1
                 root.hotspotActionIndex = 0
@@ -1895,8 +1912,8 @@ Panel {
 
     Column {
       id: column
-      anchors.left: parent.left
-      anchors.right: parent.right
+      x: root.extrasOpen && root.sideOnLeft ? width + Style.space(24) : 0
+      width: root.extrasOpen ? (parent.width - Style.space(24)) / 2 : parent.width
       anchors.top: parent.top
       spacing: Style.space(12)
 
@@ -1981,7 +1998,23 @@ Panel {
             hasCursor: root.hotspotHeaderHasCursor
             Layout.alignment: Qt.AlignVCenter
             onHovered: function(on) { if (on) root.setHeaderCursor(root.hotspotHeaderIndex) }
-            onClicked: root.toggleHotspot()
+            onClicked: root.extrasOpen = !root.extrasOpen
+          }
+
+          Button {
+            id: extrasAction
+            visible: root.hasExtras
+            iconText: "󰒓"
+            tooltipText: root.extrasOpen ? "Hide hotspot & wired settings" : "Hotspot & wired settings"
+            foreground: root.extrasOpen ? Color.accent : root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            iconSize: Style.font.subtitle * 1.5
+            horizontalPadding: Style.space(5)
+            verticalPadding: Style.space(2)
+            hasCursor: root.extrasHeaderHasCursor
+            Layout.alignment: Qt.AlignVCenter
+            onHovered: function(on) { if (on) root.setHeaderCursor(root.extrasHeaderIndex) }
+            onClicked: root.extrasOpen = !root.extrasOpen
           }
 
           ToggleSwitch {
@@ -2241,11 +2274,142 @@ Panel {
         }
       }
 
-      // Wi-Fi Hotspot
+      // DNS provider selection.
       PanelSeparator {
-        visible: root.hasHotspotSupport
         foreground: root.bar.foreground
       }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(10)
+
+        PanelSectionHeader {
+          text: "DNS PROVIDER"
+          foreground: root.bar.foreground
+          fontFamily: root.bar.fontFamily
+        }
+
+        Row {
+          id: dnsRow
+          width: parent.width
+          spacing: Style.space(6)
+
+          readonly property int count: 4
+          readonly property real cellWidth: (width - spacing * (count - 1)) / count
+
+          DnsProviderPill {
+            provider: "DHCP"
+            index: 0
+            tooltipText: "Use DNS from DHCP"
+            width: dnsRow.cellWidth
+            onClicked: root.setDns(provider)
+          }
+
+          DnsProviderPill {
+            provider: "Cloudflare"
+            index: 1
+            tooltipText: "Set DNS to Cloudflare"
+            width: dnsRow.cellWidth
+            onClicked: root.setDns(provider)
+          }
+
+          DnsProviderPill {
+            provider: "Google"
+            index: 2
+            tooltipText: "Set DNS to Google"
+            width: dnsRow.cellWidth
+            onClicked: root.setDns(provider)
+          }
+
+          DnsProviderPill {
+            provider: "Custom"
+            index: 3
+            tooltipText: "Set custom DNS servers"
+            width: dnsRow.cellWidth
+            onClicked: root.setDns(provider)
+          }
+        }
+      }
+
+
+      // Wi-Fi networks (only if a Wi-Fi station is available).
+      PanelSeparator {
+        visible: root.wifiStationAvailable
+        foreground: root.bar.foreground
+      }
+
+      PanelSectionHeader {
+        visible: root.wifiStationAvailable && root.scanning
+        text: "SCANNING WI-FI…"
+        foreground: root.bar.foreground
+        fontFamily: root.bar.fontFamily
+      }
+
+      // Scrollable network list — cap the height so a busy neighbourhood
+      // doesn't push the popup off-screen. ListView (vs Repeater+Column)
+      // gives us positionViewAtIndex for free, which is what keeps the
+      // keyboard-selected row scrolled into view as j/k walk past the
+      // visible window.
+      ListView {
+        id: networkList
+        visible: root.wifiStationAvailable
+        width: parent.width
+        height: Math.min(contentHeight, Style.space(240))
+        spacing: Style.space(4)
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        model: root.wifiStationAvailable ? root.wifiNetworks : []
+        currentIndex: root.selectedIndex
+        onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+
+        // Wrapper takes the required props from ListView's delegate context
+        // (which doesn't bind into nested `component` declarations like
+        // NetworkRow) and passes them down explicitly.
+        delegate: Item {
+          required property var modelData
+          required property int index
+          readonly property string sectionTitle: root.wifiSectionTitle(index)
+          width: ListView.view.width
+          height: delegateColumn.implicitHeight
+
+          Column {
+            id: delegateColumn
+            width: parent.width
+            spacing: Style.space(4)
+
+            PanelSectionHeader {
+              visible: sectionTitle !== ""
+              text: sectionTitle
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              height: visible ? implicitHeight : 0
+            }
+
+            NetworkRow {
+              id: row
+              width: parent.width
+              net: modelData
+              index: parent.parent.index
+            }
+          }
+        }
+      }
+    }
+
+    // Side panel with hotspot and wired settings
+    Column {
+      id: sideColumn
+      visible: root.extrasOpen
+      x: root.sideOnLeft ? 0 : column.width + Style.space(24)
+      anchors.top: parent.top
+      width: column.width
+      spacing: Style.space(12)
+
+      // Wi-Fi Hotspot
 
       Column {
         id: hotspotSection
@@ -2256,65 +2420,52 @@ Panel {
         // Header line: Section title + Active/Inactive Badge + Toggle Switch
         Item {
           width: parent.width
-          implicitHeight: Math.max(hotspotHeader.implicitHeight, hotspotToggleRow.implicitHeight)
+          implicitHeight: Math.max(hotspotHeroIcon.implicitHeight, hotspotHeroLabels.implicitHeight, hotspotToggleRow.implicitHeight)
 
-          Row {
-            id: hotspotTitleRow
+          Text {
+            id: hotspotHeroIcon
+            textFormat: Text.PlainText
+            text: root.hotspotIsRepeater && root.hotspotActive ? "󰤨" : "󱛇"
+            color: root.hotspotActive ? Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.display
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(8)
+          }
 
-            PanelSectionHeader {
-              id: hotspotHeader
-              text: "WI-FI HOTSPOT"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              anchors.verticalCenter: parent.verticalCenter
+          Column {
+            id: hotspotHeroLabels
+            anchors.left: hotspotHeroIcon.right
+            anchors.leftMargin: Style.space(14)
+            anchors.right: hotspotToggleRow.left
+            anchors.rightMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.hotspotIsRepeater && root.hotspotActive ? "Repeater" : "Hotspot"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
             }
 
-            Rectangle {
-              id: hotspotBadge
-              anchors.verticalCenter: parent.verticalCenter
-              radius: height / 2
-              color: root.hotspotActive ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2) : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
-              border.color: root.hotspotActive ? Color.accent : "transparent"
-              border.width: 1
-              implicitWidth: hotspotBadgeText.implicitWidth + Style.space(12)
-              implicitHeight: hotspotBadgeText.implicitHeight + Style.space(4)
-
-              Text {
-                id: hotspotBadgeText
-                anchors.centerIn: parent
-                text: root.hotspotActive
-                  ? (root.hotspotClients > 0 ? "ACTIVE (" + root.hotspotClients + ")" : "ACTIVE")
-                  : "INACTIVE"
-                color: root.hotspotActive ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: {
+                if (!root.hotspotActive) return "OFF"
+                if (root.hotspotClients === 0) return "ON · NO DEVICES"
+                return "ON · " + root.hotspotClients + (root.hotspotClients === 1 ? " DEVICE" : " DEVICES")
               }
-            }
-
-            Rectangle {
-              id: hotspotRepeaterBadge
-              visible: root.hotspotActive && root.hotspotIsRepeater
-              anchors.verticalCenter: parent.verticalCenter
-              radius: height / 2
-              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
-              border.color: Color.accent
-              border.width: 1
-              implicitWidth: hotspotRepeaterBadgeText.implicitWidth + Style.space(10)
-              implicitHeight: hotspotRepeaterBadgeText.implicitHeight + Style.space(4)
-
-              Text {
-                id: hotspotRepeaterBadgeText
-                anchors.centerIn: parent
-                text: "󰤨 REPEATER"
-                color: Color.accent
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
+              color: root.hotspotActive ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1.5
+              elide: Text.ElideRight
             }
           }
 
@@ -2324,9 +2475,33 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(6)
 
+            Button {
+              iconText: persisted.extrasPinned ? "󰐃" : "󰤰"
+              tooltipText: persisted.extrasPinned ? "Unpin: hide this panel when closed" : "Pin: always show this panel"
+              foreground: persisted.extrasPinned ? Color.accent : root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              iconSize: Style.font.subtitle * 1.5
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: persisted.extrasPinned = !persisted.extrasPinned
+            }
+
+            Button {
+              visible: root.hotspotActive
+              iconText: "󰐲"
+              tooltipText: "Show hotspot QR code"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              iconSize: Style.font.subtitle * 1.5
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.summonHotspotQr()
+            }
+
             ToggleSwitch {
               id: hotspotSwitch
-              trackHeight: Math.round(hotspotHeader.font.pixelSize * 1.2)
               cursorPad: Style.space(3)
               anchors.verticalCenter: parent.verticalCenter
               checked: root.hotspotActive
@@ -3334,130 +3509,6 @@ Panel {
         }
       }
 
-      // DNS provider selection.
-      PanelSeparator {
-        foreground: root.bar.foreground
-      }
-
-      Column {
-        width: parent.width
-        spacing: Style.space(10)
-
-        PanelSectionHeader {
-          text: "DNS PROVIDER"
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-        }
-
-        Row {
-          id: dnsRow
-          width: parent.width
-          spacing: Style.space(6)
-
-          readonly property int count: 4
-          readonly property real cellWidth: (width - spacing * (count - 1)) / count
-
-          DnsProviderPill {
-            provider: "DHCP"
-            index: 0
-            tooltipText: "Use DNS from DHCP"
-            width: dnsRow.cellWidth
-            onClicked: root.setDns(provider)
-          }
-
-          DnsProviderPill {
-            provider: "Cloudflare"
-            index: 1
-            tooltipText: "Set DNS to Cloudflare"
-            width: dnsRow.cellWidth
-            onClicked: root.setDns(provider)
-          }
-
-          DnsProviderPill {
-            provider: "Google"
-            index: 2
-            tooltipText: "Set DNS to Google"
-            width: dnsRow.cellWidth
-            onClicked: root.setDns(provider)
-          }
-
-          DnsProviderPill {
-            provider: "Custom"
-            index: 3
-            tooltipText: "Set custom DNS servers"
-            width: dnsRow.cellWidth
-            onClicked: root.setDns(provider)
-          }
-        }
-      }
-
-
-      // Wi-Fi networks (only if a Wi-Fi station is available).
-      PanelSeparator {
-        visible: root.wifiStationAvailable
-        foreground: root.bar.foreground
-      }
-
-      PanelSectionHeader {
-        visible: root.wifiStationAvailable && root.scanning
-        text: "SCANNING WI-FI…"
-        foreground: root.bar.foreground
-        fontFamily: root.bar.fontFamily
-      }
-
-      // Scrollable network list — cap the height so a busy neighbourhood
-      // doesn't push the popup off-screen. ListView (vs Repeater+Column)
-      // gives us positionViewAtIndex for free, which is what keeps the
-      // keyboard-selected row scrolled into view as j/k walk past the
-      // visible window.
-      ListView {
-        id: networkList
-        visible: root.wifiStationAvailable
-        width: parent.width
-        height: Math.min(contentHeight, Style.space(240))
-        spacing: Style.space(4)
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        interactive: contentHeight > height
-
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-        model: root.wifiStationAvailable ? root.wifiNetworks : []
-        currentIndex: root.selectedIndex
-        onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
-
-        // Wrapper takes the required props from ListView's delegate context
-        // (which doesn't bind into nested `component` declarations like
-        // NetworkRow) and passes them down explicitly.
-        delegate: Item {
-          required property var modelData
-          required property int index
-          readonly property string sectionTitle: root.wifiSectionTitle(index)
-          width: ListView.view.width
-          height: delegateColumn.implicitHeight
-
-          Column {
-            id: delegateColumn
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              visible: sectionTitle !== ""
-              text: sectionTitle
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              height: visible ? implicitHeight : 0
-            }
-
-            NetworkRow {
-              id: row
-              width: parent.width
-              net: modelData
-              index: parent.parent.index
-            }
-          }
-        }
-      }
     }
   }
 
