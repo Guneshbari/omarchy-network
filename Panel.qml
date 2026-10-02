@@ -443,6 +443,10 @@ Panel {
   property var scannerDevice: null
 
   function setScannerEnabled(enabled) {
+    if (root.hotspotActive) {
+      if (scannerDevice) scannerDevice.scannerEnabled = false
+      return
+    }
     var nextDevice = opened ? wifiDevice : null
 
     if (scannerDevice && scannerDevice !== nextDevice)
@@ -452,6 +456,17 @@ Panel {
 
     if (scannerDevice)
       scannerDevice.scannerEnabled = enabled
+  }
+
+  onHotspotActiveChanged: {
+    if (hotspotActive) {
+      setScannerEnabled(false)
+    } else {
+      root.dismissHotspotQr()
+      if (opened) {
+        setScannerEnabled(true)
+      }
+    }
   }
 
   Component.onDestruction: {
@@ -676,7 +691,7 @@ Panel {
       dnsProc.command = ["omarchy-dns"]
       dnsProc.running = true
     }
-    if (!bandProc.running) {
+    if (!bandProc.running && !root.hotspotActive) {
       bandProc.command = ["omarchy-network-band"]
       bandProc.running = true
     }
@@ -684,7 +699,7 @@ Panel {
     root.refreshHotspot()
     // A closed panel has no nearby-network list to fill, and bare refresh()
     // reaches here from action completion, timeouts and construction.
-    if (opened && wifiDevice) {
+    if (opened && wifiDevice && !root.hotspotActive) {
       if (scanWifi) {
         scanning = true
         setScannerEnabled(false)
@@ -1350,13 +1365,15 @@ Panel {
     runNetworkAction("connect", networkForSsid(ssid), function(network) { network.connectWithPsk(passphrase) })
   }
 
-  function connectEnterprise(ssid, identity, passphrase) {
+  function connectEnterprise(ssid, identity, passphrase, caCert) {
     if (!ssid || /[\r\n]/.test(ssid)) return
     if (!identity || /[\r\n]/.test(identity)) return
     if (!passphrase || /[\r\n]/.test(passphrase)) return
+    var ca = caCert || ""
+    if (/[\r\n]/.test(ca)) return
     runNetworkAction("connect", networkForSsid(ssid), function(network) {
       enterpriseConnect.secret = passphrase
-      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity]
+      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity, ca]
       enterpriseConnect.running = true
       root.passwordText = ""
       root.identityText = ""
@@ -1418,7 +1435,7 @@ Panel {
     interval: 100
     repeat: false
     onTriggered: {
-      if (root.opened && root.wifiDevice) {
+      if (root.opened && root.wifiDevice && !root.hotspotActive) {
         root.setScannerEnabled(true)
         scanDone.start()
       }
@@ -1455,7 +1472,7 @@ Panel {
     id: bandPoll
     interval: 4000
     repeat: true
-    running: root.opened
+    running: root.opened && !root.hotspotActive
     onTriggered: {
       if (bandProc.running) return
       bandProc.command = ["omarchy-network-band"]
@@ -1561,11 +1578,6 @@ Panel {
     }
   }
 
-  onHotspotActiveChanged: {
-    if (!root.hotspotActive) {
-      root.dismissHotspotQr()
-    }
-  }
 
   Process {
     id: hotspotQrProc

@@ -322,11 +322,18 @@ var enterpriseConnectScript =
   'if [[ -z "$pw" ]]; then exit 1; fi; ' +
   'ssid=$(printf "%s" "$1" | tr -d "\\r\\n"); ' +
   'identity=$(printf "%s" "$2" | tr -d "\\r\\n"); ' +
+  'ca_cert=$(printf "%s" "$3" | tr -d "\\r\\n"); ' +
   'if [[ -z "$ssid" || -z "$identity" ]]; then exit 1; fi; ' +
   'trap \'nmcli connection delete uuid "$u" >/dev/null 2>&1 || true\' HUP INT TERM; ' +
+  'ca_args=(); ' +
+  'if [[ -n "$ca_cert" && -f "$ca_cert" ]]; then ' +
+  '  ca_args+=(802-1x.ca-cert "$ca_cert"); ' +
+  'else ' +
+  '  ca_args+=(802-1x.system-ca-certs yes); ' +
+  'fi; ' +
   'nmcli connection add type wifi con-name "$ssid" ssid "$ssid" connection.uuid "$u" ' +
   '  wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2 ' +
-  '  802-1x.identity "$identity" 802-1x.auth-timeout 8 >/dev/null ' +
+  '  802-1x.identity "$identity" "${ca_args[@]}" 802-1x.auth-timeout 8 >/dev/null ' +
   '  && printf \'set 802-1x.password %s\\nsave\\nquit\\n\' "$pw" | nmcli connection edit uuid "$u" >/dev/null ' +
   '  && nmcli connection up uuid "$u" ' +
   '  || { nmcli connection delete uuid "$u" >/dev/null 2>&1; exit 1; }'
@@ -528,87 +535,101 @@ var hotspotQueryScript =
   '  ap_iface=""; ' +
   'fi; ' +
   'client_json="[]"; ' +
-  'if [[ "$active" == "true" && -n "$ap_iface" && "$ap_iface" =~ ^[a-zA-Z0-9_.-]+$ ]]; then ' +
-  '  parsed=$(iw dev "$ap_iface" station dump 2>/dev/null | awk -v iface="$ap_iface" \'' +
+  'if [[ "$active" == "true" ]]; then ' +
+  '  client_json=$(awk -v iface="${ap_iface:-}" \'' +
   'BEGIN {' +
-  '  while ((getline line < "/proc/net/arp") > 0) {' +
-  '    split(line, f);' +
-  '    if (f[6] == iface && f[4] ~ /^[0-9a-fA-F:]+$/) arp[toupper(f[4])] = f[1];' +
-  '  }' +
-  '  close("/proc/net/arp");' +
-  '  cmd = "ip -4 neigh show dev " iface " 2>/dev/null";' +
+  '  cmd = "cat /tmp/create_ap.*.conf.*/dnsmasq.leases /var/lib/NetworkManager/dnsmasq-*.leases 2>/dev/null";' +
   '  while ((cmd | getline line) > 0) {' +
   '    n = split(line, f);' +
-  '    for (i = 1; i < n; i++) if (f[i] == "lladdr") arp[toupper(f[i+1])] = f[1];' +
+  '    if (n >= 3 && f[2] ~ /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/) {' +
+  '      m = toupper(f[2]);' +
+  '      seen[m] = 1;' +
+  '      if (f[3] ~ /^[0-9.]+$/) client_ip[m] = f[3];' +
+  '      if (n >= 4 && f[4] != "*" && f[4] != "") client_host[m] = f[4];' +
+  '    }' +
   '  }' +
   '  close(cmd);' +
+  '  while ((getline line < "/proc/net/arp") > 0) {' +
+  '    split(line, f);' +
+  '    if (f[4] ~ /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/) {' +
+  '      m = toupper(f[4]);' +
+  '      if (m != "00:00:00:00:00:00") {' +
+  '        if (!(m in client_ip) || client_ip[m] == "") client_ip[m] = f[1];' +
+  '      }' +
+  '    }' +
+  '  }' +
+  '  close("/proc/net/arp");' +
+  '  if (iface != "") {' +
+  '    cmd = "ip -4 neigh show dev " iface " 2>/dev/null";' +
+  '    while ((cmd | getline line) > 0) {' +
+  '      n = split(line, f);' +
+  '      for (i = 1; i < n; i++) {' +
+  '        if (f[i] == "lladdr" && f[i+1] ~ /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/) {' +
+  '          m = toupper(f[i+1]);' +
+  '          if (!(m in client_ip) || client_ip[m] == "") client_ip[m] = f[1];' +
+  '        }' +
+  '      }' +
+  '    }' +
+  '    close(cmd);' +
+  '  }' +
   '}' +
   '/^Station / {' +
-  '  if (mac != "") print_st();' +
-  '  mac = toupper($2); sig = ""; tx = ""; rx = ""; ct = "";' +
+  '  m = toupper($2);' +
+  '  if (m ~ /^([0-9A-F]{2}[:-]){5}[0-9A-F]{2}$/) {' +
+  '    cur_m = m; seen[cur_m] = 1;' +
+  '  } else {' +
+  '    cur_m = "";' +
+  '  }' +
   '  next;' +
   '}' +
-  '/^[[:space:]]*signal:/ {' +
-  '  for (i=1; i<=NF; i++) if ($i ~ /^-?[0-9]+$/) { sig = $i; break; }' +
+  'cur_m != "" && /^[[:space:]]*signal:/ {' +
+  '  for (i=1; i<=NF; i++) if ($i ~ /^-?[0-9]+$/) { client_sig[cur_m] = $i; break; }' +
   '}' +
-  '/^[[:space:]]*tx bitrate:/ {' +
+  'cur_m != "" && /^[[:space:]]*tx bitrate:/ {' +
   '  sub(/^[[:space:]]*tx bitrate:[[:space:]]*/, "");' +
-  '  if (match($0, /^[0-9.]+[[:space:]]*M?B[a-zA-Z/]*/)) tx = substr($0, RSTART, RLENGTH);' +
-  '  else tx = $0;' +
+  '  if (match($0, /^[0-9.]+[[:space:]]*M?B[a-zA-Z/]*/)) client_tx[cur_m] = substr($0, RSTART, RLENGTH);' +
+  '  else client_tx[cur_m] = $0;' +
   '}' +
-  '/^[[:space:]]*rx bitrate:/ {' +
+  'cur_m != "" && /^[[:space:]]*rx bitrate:/ {' +
   '  sub(/^[[:space:]]*rx bitrate:[[:space:]]*/, "");' +
-  '  if (match($0, /^[0-9.]+[[:space:]]*M?B[a-zA-Z/]*/)) rx = substr($0, RSTART, RLENGTH);' +
-  '  else rx = $0;' +
+  '  if (match($0, /^[0-9.]+[[:space:]]*M?B[a-zA-Z/]*/)) client_rx[cur_m] = substr($0, RSTART, RLENGTH);' +
+  '  else client_rx[cur_m] = $0;' +
   '}' +
-  '/^[[:space:]]*connected time:/ {' +
+  'cur_m != "" && /^[[:space:]]*connected time:/ {' +
   '  sub(/^[[:space:]]*connected time:[[:space:]]*/, "");' +
   '  s = $1 + 0;' +
-  '  if (s < 60) ct = s "s";' +
-  '  else if (s < 3600) ct = int(s / 60) "m " (s % 60) "s";' +
-  '  else ct = int(s / 3600) "h " int((s % 3600) / 60) "m";' +
+  '  if (s < 60) client_ct[cur_m] = s "s";' +
+  '  else if (s < 3600) client_ct[cur_m] = int(s / 60) "m " (s % 60) "s";' +
+  '  else client_ct[cur_m] = int(s / 3600) "h " int((s % 3600) / 60) "m";' +
   '}' +
-  'function print_st() {' +
-  '  ip = (mac in arp) ? arp[mac] : "";' +
-  '  printf "%s|%s|%s|%s|%s|%s\\n", mac, ip, sig, tx, rx, ct;' +
-  '}' +
-  'END { if (mac != "") print_st(); }\'); ' +
-  '  items=""; ' +
-  '  while IFS="|" read -r mac ip sig tx rx ct; do ' +
-  '    [[ -z "$mac" || ! "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]] && continue; ' +
-  '    oui=$(echo "$mac" | tr -d ":" | cut -c1-6); ' +
-  '    vendor=$(grep -m 1 -i "^$oui" /usr/share/hwdata/oui.txt 2>/dev/null | awk -F"\\t+" \'{print $NF}\'); ' +
-  '    hostname=""; ' +
-  '    if [[ -n "$ip" && "$ip" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then ' +
-  '      h=$(getent hosts "$ip" 2>/dev/null | awk \'{print $2; exit}\'); ' +
-  '      if [[ -n "$h" && "$h" != *"local" && "$h" != *"arpa" && "$h" != "omarchy" ]]; then ' +
-  '        hostname="$h"; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '    name="$hostname"; ' +
-  '    if [[ -z "$name" ]]; then name="$vendor"; fi; ' +
-  '    if [[ -z "$name" ]]; then ' +
-  '      fb=$((16#${mac:0:2})); ' +
-  '      if (( (fb & 2) != 0 )); then ' +
-  '        name="Private Device (${mac: -5})"; ' +
-  '      else ' +
-  '        name="Device (${mac: -5})"; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '    item=$(jq -nc ' +
-  '      --arg mac "$mac" ' +
-  '      --arg ip "$ip" ' +
-  '      --arg name "$name" ' +
-  '      --arg vendor "$vendor" ' +
-  '      --arg hostname "$hostname" ' +
-  '      --arg sig "$sig" ' +
-  '      --arg tx "$tx" ' +
-  '      --arg rx "$rx" ' +
-  '      --arg ct "$ct" ' +
-  '      \'{mac: $mac, ip: $ip, name: $name, vendor: $vendor, hostname: $hostname, signal: (if $sig != "" then ($sig|tonumber) else null end), txBitrate: $tx, rxBitrate: $rx, connectedTime: $ct}\'); ' +
-  '    items="${items:+$items,}$item"; ' +
-  '  done <<< "$parsed"; ' +
-  '  client_json="[$items]"; ' +
+  'END {' +
+  '  first = 1;' +
+  '  printf "[";' +
+  '  for (m in seen) {' +
+  '    if (m == "" || m == "00:00:00:00:00:00") continue;' +
+  '    ip = (m in client_ip) ? client_ip[m] : "";' +
+  '    host = (m in client_host) ? client_host[m] : "";' +
+  '    sig = (m in client_sig) ? client_sig[m] : "";' +
+  '    tx = (m in client_tx) ? client_tx[m] : "";' +
+  '    rx = (m in client_rx) ? client_rx[m] : "";' +
+  '    ct = (m in client_ct) ? client_ct[m] : "";' +
+  '    if (host != "") {' +
+  '      name = host;' +
+  '    } else {' +
+  '      b = substr(m, 2, 1);' +
+  '      suffix = substr(m, 13);' +
+  '      if (b ~ /[2367AaBbEeFf]/) name = "Private Device (" suffix ")";' +
+  '      else if (ip != "") name = ip;' +
+  '      else name = "Device (" suffix ")";' +
+  '    }' +
+  '    sig_val = (sig != "" && sig ~ /^-?[0-9]+$/) ? sig : "null";' +
+  '    if (!first) printf ",";' +
+  '    first = 0;' +
+  '    printf "{\\"mac\\":\\"%s\\",\\"ip\\":\\"%s\\",\\"name\\":\\"%s\\",\\"vendor\\":\\"\\",\\"hostname\\":\\"%s\\",\\"signal\\":%s,\\"txBitrate\\":\\"%s\\",\\"rxBitrate\\":\\"%s\\",\\"connectedTime\\":\\"%s\\"}", m, ip, name, host, sig_val, tx, rx, ct;' +
+  '  }' +
+  '  printf "]";' +
+  '}\' <(if [[ -n "$ap_iface" ]]; then iw dev "$ap_iface" station dump 2>/dev/null; fi)); ' +
+  '  if [[ -z "$client_json" || "$client_json" != "["*"]" ]]; then client_json="[]"; fi; ' +
   'fi; ' +
   'clients=$(echo "$client_json" | jq "length" 2>/dev/null || echo 0); ' +
   'printf "%s" "${pwd:-omarchy12345}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
@@ -640,13 +661,23 @@ var hotspotApplyScript =
   '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
   '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
   '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      ipv4.method shared ${dev:+ifname "$dev"} 2>&1); then ' +
+  '      802-11-wireless-security.proto rsn ' +
+  '      802-11-wireless-security.pairwise ccmp ' +
+  '      802-11-wireless-security.group ccmp ' +
+  '      802-11-wireless-security.pmf 1 ' +
+  '      ipv4.method shared ipv6.method ignore ${dev:+ifname "$dev"} 2>&1); then ' +
   '      err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
   '      echo "Failed to create hotspot connection: ${err_detail:-$nm_out}" >&2; ' +
   '      exit 1; ' +
   '    fi; ' +
   '  else ' +
-  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" >/dev/null 2>&1 || true; ' +
+  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk ' +
+  '      802-11-wireless-security.proto rsn ' +
+  '      802-11-wireless-security.pairwise ccmp ' +
+  '      802-11-wireless-security.group ccmp ' +
+  '      802-11-wireless-security.pmf 1 ' +
+  '      ipv6.method ignore >/dev/null 2>&1 || true; ' +
   '  fi; ' +
   '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then ' +
   '    echo "Failed to configure hotspot password" >&2; ' +
@@ -673,16 +704,23 @@ var hotspotApplyScript =
   '    pkexec create_ap --stop "$running_pid" >/dev/null 2>&1 || true; ' +
   '  fi; ' +
   '  for d in /tmp/create_ap.*.conf.*; do ' +
+  '    if [[ -d "$d" && ! -L "$d" && -f "$d/dnsmasq.pid" && ! -L "$d/dnsmasq.pid" ]]; then ' +
+  '      dp=$(cat "$d/dnsmasq.pid" 2>/dev/null); ' +
+  '      if [[ -n "$dp" && "$dp" =~ ^[0-9]+$ && -d "/proc/$dp" ]] && grep -q "dnsmasq" "/proc/$dp/cmdline" 2>/dev/null; then ' +
+  '        pkexec kill "$dp" >/dev/null 2>&1 || true; ' +
+  '      fi; ' +
+  '    fi; ' +
   '    if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
   '      if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
   '        p=$(cat "$d/pid" 2>/dev/null); ' +
-  '        if [[ -n "$p" && "$p" =~ ^[0-9]+$ && -d "/proc/$p" && $(stat -c \'%u\' "/proc/$p" 2>/dev/null) -eq 0 ]] && grep -q "create_ap" "/proc/$p/cmdline" 2>/dev/null; then ' +
+  '        if [[ -n "$p" && "$p" =~ ^[0-9]+$ && -d "/proc/$p" ]] && grep -q "create_ap" "/proc/$p/cmdline" 2>/dev/null; then ' +
   '          pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
   '        fi; ' +
   '      fi; ' +
   '    fi; ' +
   '  done; ' +
   '  if [[ -n "$dev" ]]; then ' +
+  '    pkexec create_ap --stop "$dev" >/dev/null 2>&1 || true; ' +
   '    for p in $(pgrep -u 0 -f "create_ap" 2>/dev/null); do ' +
   '      if [[ "$p" =~ ^[0-9]+$ ]]; then ' +
   '        pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
@@ -714,13 +752,25 @@ var hotspotApplyScript =
   '      fi; ' +
   '    fi; ' +
   '  fi; ' +
+  '  for d in /tmp/create_ap.*.conf.*; do ' +
+  '    if [[ -d "$d" && ! -L "$d" && -f "$d/dnsmasq.pid" && ! -L "$d/dnsmasq.pid" ]]; then ' +
+  '      dp=$(cat "$d/dnsmasq.pid" 2>/dev/null); ' +
+  '      if [[ -n "$dp" && "$dp" =~ ^[0-9]+$ && -d "/proc/$dp" ]] && grep -q "dnsmasq" "/proc/$dp/cmdline" 2>/dev/null; then ' +
+  '        pkexec kill "$dp" >/dev/null 2>&1 || true; ' +
+  '      fi; ' +
+  '    fi; ' +
+  '  done; ' +
+  '  gw="192.168.12.1"; ' +
+  '  if ip route show 2>/dev/null | grep -q "192.168.12\\."; then gw="192.168.13.1"; fi; ' +
+  '  up_dns=$(resolvectl dns "$dev" 2>/dev/null | awk \'{$1=""; print $0}\' | tr \' \' \'\\n\' | grep -E \'^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\' | grep -v \'^127\\.\' | paste -sd, -); ' +
+  '  if [[ -n "$up_dns" ]]; then dns_servers="$up_dns"; else dns_servers="1.1.1.1,8.8.8.8"; fi; ' +
   '  cap_sec_dir=$(mktemp -d /tmp/create_ap_sec.XXXXXX); ' +
   '  chmod 700 "$cap_sec_dir"; ' +
   '  cap_conf="$cap_sec_dir/ap.conf"; ' +
   '  cap_log="$cap_sec_dir/ap.log"; ' +
   '  touch "$cap_conf" "$cap_log"; ' +
   '  chmod 600 "$cap_conf" "$cap_log"; ' +
-  '  printf "WIFI_IFACE=%s\\nINTERNET_IFACE=%s\\nSSID=%s\\nPASSPHRASE=%s\\nCHANNEL=default\\nFREQ_BAND=default\\nDAEMONIZE=1\\n" "$dev" "$dev" "$ssid" "$pwd" > "$cap_conf"; ' +
+  '  printf "WIFI_IFACE=%s\\nINTERNET_IFACE=%s\\nSSID=%s\\nPASSPHRASE=%s\\nGATEWAY=%s\\nCHANNEL=default\\nFREQ_BAND=default\\nDHCP_DNS=%s\\nIEEE80211N=1\\nHT_CAPAB=[SHORT-GI-20]\\nDAEMONIZE=1\\n" "$dev" "$dev" "$ssid" "$pwd" "$gw" "$dns_servers" > "$cap_conf"; ' +
   '  trap \'rm -rf "$cap_sec_dir"\' EXIT HUP INT QUIT TERM; ' +
   '  pkexec create_ap --config "$cap_conf" > "$cap_log" 2>&1; ' +
   '  pk_status=$?; ' +
@@ -777,13 +827,23 @@ var hotspotApplyScript =
   '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
   '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
   '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      ipv4.method shared ${dev:+ifname "$dev"} 2>&1); then ' +
+  '      802-11-wireless-security.proto rsn ' +
+  '      802-11-wireless-security.pairwise ccmp ' +
+  '      802-11-wireless-security.group ccmp ' +
+  '      802-11-wireless-security.pmf 1 ' +
+  '      ipv4.method shared ipv6.method ignore ${dev:+ifname "$dev"} 2>&1); then ' +
   '      err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
   '      echo "Failed to create hotspot: ${err_detail:-$nm_out}" >&2; ' +
   '      exit 1; ' +
   '    fi; ' +
   '  else ' +
-  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" >/dev/null 2>&1 || true; ' +
+  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" ' +
+  '      802-11-wireless-security.key-mgmt wpa-psk ' +
+  '      802-11-wireless-security.proto rsn ' +
+  '      802-11-wireless-security.pairwise ccmp ' +
+  '      802-11-wireless-security.group ccmp ' +
+  '      802-11-wireless-security.pmf 1 ' +
+  '      ipv6.method ignore >/dev/null 2>&1 || true; ' +
   '  fi; ' +
   '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then ' +
   '    echo "Failed to configure hotspot password" >&2; ' +
