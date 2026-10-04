@@ -323,13 +323,18 @@ var enterpriseConnectScript =
   'ssid=$(printf "%s" "$1" | tr -d "\\r\\n"); ' +
   'identity=$(printf "%s" "$2" | tr -d "\\r\\n"); ' +
   'ca_cert=$(printf "%s" "$3" | tr -d "\\r\\n"); ' +
+  'domain=$(printf "%s" "$4" | tr -d "\\r\\n"); ' +
   'if [[ -z "$ssid" || -z "$identity" ]]; then exit 1; fi; ' +
   'trap \'nmcli connection delete uuid "$u" >/dev/null 2>&1 || true\' HUP INT TERM; ' +
   'ca_args=(); ' +
   'if [[ -n "$ca_cert" && -f "$ca_cert" ]]; then ' +
   '  ca_args+=(802-1x.ca-cert "$ca_cert"); ' +
+  '  if [[ -n "$domain" ]]; then ' +
+  '    ca_args+=(802-1x.domain-suffix-match "$domain"); ' +
+  '  fi; ' +
   'else ' +
-  '  ca_args+=(802-1x.system-ca-certs yes); ' +
+  '  if [[ -z "$domain" ]]; then exit 1; fi; ' +
+  '  ca_args+=(802-1x.system-ca-certs yes 802-1x.domain-suffix-match "$domain"); ' +
   'fi; ' +
   'nmcli connection add type wifi con-name "$ssid" ssid "$ssid" connection.uuid "$u" ' +
   '  wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2 ' +

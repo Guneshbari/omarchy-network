@@ -28,6 +28,7 @@ Panel {
     passwordSsid = ""
     passwordText = ""
     identityText = ""
+    domainText = ""
   }
 
   // Live connection details from `ip` / /sys / iw.
@@ -99,6 +100,7 @@ Panel {
   property string passwordSsid: ""
   property string passwordText: ""
   property string identityText: ""
+  property string domainText: ""
 
   // Wired connection state
   property string wiredConnectionName: "Wired connection 1"
@@ -507,6 +509,7 @@ Panel {
       passwordSsid = ""
       passwordText = ""
       identityText = ""
+      domainText = ""
     }
   }
 
@@ -518,6 +521,7 @@ Panel {
     if (passwordSsid === "" && opened) {
       passwordText = ""
       identityText = ""
+      domainText = ""
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
     }
   }
@@ -1289,6 +1293,7 @@ Panel {
     if (passwordSsid !== ssid) {
       passwordText = ""
       identityText = ""
+      domainText = ""
     }
     passwordSsid = ssid
   }
@@ -1365,18 +1370,21 @@ Panel {
     runNetworkAction("connect", networkForSsid(ssid), function(network) { network.connectWithPsk(passphrase) })
   }
 
-  function connectEnterprise(ssid, identity, passphrase, caCert) {
+  function connectEnterprise(ssid, identity, passphrase, caCert, domain) {
     if (!ssid || /[\r\n]/.test(ssid)) return
     if (!identity || /[\r\n]/.test(identity)) return
     if (!passphrase || /[\r\n]/.test(passphrase)) return
     var ca = caCert || ""
     if (/[\r\n]/.test(ca)) return
+    var dom = domain || ""
+    if (/[\r\n]/.test(dom)) return
     runNetworkAction("connect", networkForSsid(ssid), function(network) {
       enterpriseConnect.secret = passphrase
-      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity, ca]
+      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity, ca, dom]
       enterpriseConnect.running = true
       root.passwordText = ""
       root.identityText = ""
+      root.domainText = ""
     })
   }
 
@@ -3574,7 +3582,9 @@ Panel {
         root.passwordText = ""
         return
       }
-      if (root.identityText.length > 0) root.connectEnterprise(net.ssid, root.identityText, root.passwordText)
+      if (root.identityText.length > 0 && root.domainText.length > 0) {
+        root.connectEnterprise(net.ssid, root.identityText, root.passwordText, "", root.domainText)
+      }
     }
 
     Connections {
@@ -3786,7 +3796,9 @@ Panel {
       anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
       anchors.topMargin: Style.space(4)
-      implicitHeight: (idField.visible ? idField.implicitHeight + Style.space(4) : 0) + pwField.implicitHeight + Style.spacing.rowGap
+      implicitHeight: (row.isEnterprise
+        ? idField.implicitHeight + domainField.implicitHeight + Style.space(8)
+        : 0) + pwField.implicitHeight + Style.spacing.rowGap
       height: implicitHeight
 
       TextField {
@@ -3796,7 +3808,7 @@ Panel {
         anchors.right: connectPwBtn.left
         anchors.top: parent.top
         anchors.rightMargin: Style.space(6)
-        placeholderText: "Identity (user@domain)"
+        placeholderText: "Identity (username or user@realm)"
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         foreground: root.bar.foreground
@@ -3805,12 +3817,40 @@ Panel {
         enabled: !row.isBusy
         text: row.isPasswordOpen ? root.identityText : ""
 
-        onAccepted: pwField.forceActiveFocus()
+        onAccepted: domainField.forceActiveFocus()
         onTextChanged: if (row.isPasswordOpen && text !== root.identityText) root.identityText = text
         Keys.onEscapePressed: root.cancelPasswordPrompt()
+        Keys.onDownPressed: function(event) { domainField.forceActiveFocus(); event.accepted = true }
+        Keys.onTabPressed: function(event) { domainField.forceActiveFocus(); event.accepted = true }
 
         onVisibleChanged: if (visible) Qt.callLater(forceActiveFocus)
         Component.onCompleted: if (visible) Qt.callLater(forceActiveFocus)
+      }
+
+      TextField {
+        id: domainField
+        visible: row.isEnterprise && !row.isBusy && !row.isFailed
+        anchors.left: parent.left
+        anchors.right: connectPwBtn.left
+        anchors.top: idField.bottom
+        anchors.topMargin: Style.space(4)
+        anchors.rightMargin: Style.space(6)
+        placeholderText: "Domain (e.g. radius.example.com)"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        foreground: root.bar.foreground
+        horizontalPadding: Style.spacing.controlGap
+        verticalPadding: Style.spacing.controlPaddingY
+        enabled: !row.isBusy
+        text: row.isPasswordOpen ? root.domainText : ""
+
+        onAccepted: pwField.forceActiveFocus()
+        onTextChanged: if (row.isPasswordOpen && text !== root.domainText) root.domainText = text
+        Keys.onEscapePressed: root.cancelPasswordPrompt()
+        Keys.onDownPressed: function(event) { pwField.forceActiveFocus(); event.accepted = true }
+        Keys.onTabPressed: function(event) { pwField.forceActiveFocus(); event.accepted = true }
+        Keys.onUpPressed: function(event) { idField.forceActiveFocus(); event.accepted = true }
+        Keys.onBacktabPressed: function(event) { idField.forceActiveFocus(); event.accepted = true }
       }
 
       TextField {
@@ -3818,8 +3858,8 @@ Panel {
         visible: !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Style.spacing.rowGap / 2
+        anchors.top: row.isEnterprise ? domainField.bottom : parent.top
+        anchors.topMargin: row.isEnterprise ? Style.space(4) : 0
         anchors.rightMargin: Style.space(6)
         password: true
         placeholderText: "Passphrase"
@@ -3831,9 +3871,27 @@ Panel {
         enabled: !row.isBusy
         text: row.isPasswordOpen ? root.passwordText : ""
 
-        onAccepted: row.submitCredentials()
+        onAccepted: {
+          if (row.isEnterprise && root.domainText.length === 0) {
+            domainField.forceActiveFocus()
+          } else {
+            row.submitCredentials()
+          }
+        }
         onTextChanged: if (row.isPasswordOpen && text !== root.passwordText) root.passwordText = text
         Keys.onEscapePressed: root.cancelPasswordPrompt()
+        Keys.onUpPressed: function(event) {
+          if (row.isEnterprise) {
+            domainField.forceActiveFocus()
+            event.accepted = true
+          }
+        }
+        Keys.onBacktabPressed: function(event) {
+          if (row.isEnterprise) {
+            domainField.forceActiveFocus()
+            event.accepted = true
+          }
+        }
 
         onVisibleChanged: if (visible && !row.isEnterprise) Qt.callLater(forceActiveFocus)
         Component.onCompleted: if (visible && !row.isEnterprise) Qt.callLater(forceActiveFocus)
@@ -3870,7 +3928,7 @@ Panel {
         visible: !row.isBusy && !row.isFailed
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        enabled: row.net && pwField.text.length > 0 && (!row.isEnterprise || idField.text.length > 0)
+        enabled: row.net && pwField.text.length > 0 && (!row.isEnterprise || (idField.text.length > 0 && domainField.text.length > 0))
         iconText: "󰄬"
         tooltipText: "Connect"
         foreground: root.bar.foreground
