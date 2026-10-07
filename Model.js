@@ -308,6 +308,13 @@ function requiresCredentials(security, openSecurity, oweSecurity) {
   return security !== openSecurity && security !== oweSecurity
 }
 
+// An 802.1X (PEAP) profile must pin the authentication server's name: a CA chain
+// alone accepts any host holding a valid certificate for an unrelated domain.
+// Requires a real hostname/suffix with at least one dot (no bare "com").
+function isValidServerDomain(value) {
+  return /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(String(value || ""))
+}
+
 function canForgetNetwork(network) {
   return !!(network && network.known && !network.connected)
 }
@@ -317,31 +324,34 @@ function canForgetNetwork(network) {
 // must never be an argument (printf is a bash builtin, so no process spawns
 // with it either).
 var enterpriseConnectScript =
-  'u=$(uuidgen); IFS= read -r pw; ' +
-  'pw=$(printf "%s" "$pw" | tr -d "\\r\\n"); ' +
-  'if [[ -z "$pw" ]]; then exit 1; fi; ' +
-  'ssid=$(printf "%s" "$1" | tr -d "\\r\\n"); ' +
-  'identity=$(printf "%s" "$2" | tr -d "\\r\\n"); ' +
-  'ca_cert=$(printf "%s" "$3" | tr -d "\\r\\n"); ' +
-  'domain=$(printf "%s" "$4" | tr -d "\\r\\n"); ' +
-  'if [[ -z "$ssid" || -z "$identity" ]]; then exit 1; fi; ' +
-  'trap \'nmcli connection delete uuid "$u" >/dev/null 2>&1 || true\' HUP INT TERM; ' +
-  'ca_args=(); ' +
-  'if [[ -n "$ca_cert" && -f "$ca_cert" ]]; then ' +
-  '  ca_args+=(802-1x.ca-cert "$ca_cert"); ' +
-  '  if [[ -n "$domain" ]]; then ' +
-  '    ca_args+=(802-1x.domain-suffix-match "$domain"); ' +
-  '  fi; ' +
-  'else ' +
-  '  if [[ -z "$domain" ]]; then exit 1; fi; ' +
-  '  ca_args+=(802-1x.system-ca-certs yes 802-1x.domain-suffix-match "$domain"); ' +
-  'fi; ' +
-  'nmcli connection add type wifi con-name "$ssid" ssid "$ssid" connection.uuid "$u" ' +
-  '  wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2 ' +
-  '  802-1x.identity "$identity" "${ca_args[@]}" 802-1x.auth-timeout 8 >/dev/null ' +
-  '  && printf \'set 802-1x.password %s\\nsave\\nquit\\n\' "$pw" | nmcli connection edit uuid "$u" >/dev/null ' +
-  '  && nmcli connection up uuid "$u" ' +
-  '  || { nmcli connection delete uuid "$u" >/dev/null 2>&1; exit 1; }'
+  'u=$(uuidgen) || exit 1\n' +
+  'IFS= read -r pw\n' +
+  'pw=$(printf "%s" "$pw" | tr -d "\\r\\n")\n' +
+  'if [[ -z "$pw" ]]; then exit 1; fi\n' +
+  'ssid=$(printf "%s" "$1" | tr -d "\\r\\n")\n' +
+  'identity=$(printf "%s" "$2" | tr -d "\\r\\n")\n' +
+  'ca_cert=$(printf "%s" "$3" | tr -d "\\r\\n")\n' +
+  'domain=$(printf "%s" "$4" | tr -d "\\r\\n")\n' +
+  'if [[ -z "$ssid" || -z "$identity" ]]; then exit 1; fi\n' +
+  '# The expected authentication-server name is mandatory. A trusted CA alone is not\n' +
+  '# enough: any host with a valid certificate for an unrelated domain could otherwise\n' +
+  '# impersonate the SSID and collect the PEAP exchange.\n' +
+  'if [[ ! "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then exit 1; fi\n' +
+  'ca_args=()\n' +
+  'if [[ -n "$ca_cert" ]]; then\n' +
+  '  if [[ ! -f "$ca_cert" ]]; then exit 1; fi\n' +
+  '  ca_args+=(802-1x.ca-cert "$ca_cert")\n' +
+  'else\n' +
+  '  ca_args+=(802-1x.system-ca-certs yes)\n' +
+  'fi\n' +
+  'ca_args+=(802-1x.domain-suffix-match "$domain")\n' +
+  'trap \'nmcli connection delete uuid "$u" >/dev/null 2>&1 || true\' HUP INT TERM\n' +
+  'nmcli connection add type wifi con-name "$ssid" ssid "$ssid" connection.uuid "$u" \\\n' +
+  '  wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2 \\\n' +
+  '  802-1x.identity "$identity" "${ca_args[@]}" 802-1x.auth-timeout 8 >/dev/null \\\n' +
+  '  && printf "set 802-1x.password %s\\nsave\\nquit\\n" "$pw" | nmcli connection edit uuid "$u" >/dev/null \\\n' +
+  '  && nmcli connection up uuid "$u" \\\n' +
+  '  || { nmcli connection delete uuid "$u" >/dev/null 2>&1; exit 1; }\n'
 
 function networkFailureReason(reason, needsCredentials, reasons) {
   var r = reasons || {}
@@ -365,122 +375,281 @@ function shouldRepromptPassphrase(reason, needsCredentials, reasons) {
   return reason === r.NoSecrets || reason === r.WifiAuthTimeout
 }
 
+// Wired-uplink detection shared by the hotspot and wired scripts (see eth_detect.sh
+// semantics: kernel view, not nmcli STATE).
+var ethDetectFunction =
+  '# Wired-uplink detection, shared by the hotspot and wired scripts.\n' +
+  '# Reads the kernel\'s view (/sys/class/net) instead of nmcli\'s STATE column, so a\n' +
+  '# link that NetworkManager reports as "connected (externally)" or "unmanaged"\n' +
+  '# (systemd-networkd, dhcpcd, a dock...) is still found. Physical NICs only: virtual\n' +
+  '# devices (veth, bridges, tunnels...) have no /sys/.../device node.\n' +
+  'net_is_physical_eth() {\n' +
+  '  local p="$1" n="${1##*/}"\n' +
+  '  [[ -n "$n" && -d "$p" ]] || return 1\n' +
+  '  [[ -e "$p/device" && ! -d "$p/wireless" && ! -d "$p/phy80211" ]] || return 1\n' +
+  '  [[ "$n" =~ ^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt) ]] && return 1\n' +
+  '  [[ "$(cat "$p/type" 2>/dev/null)" == 1 ]] || return 1\n' +
+  '  return 0\n' +
+  '}\n' +
+  '# Prints the live ethernet device (default-route device first), nothing if none is up.\n' +
+  'detect_eth() {\n' +
+  '  local sysnet=/sys/class/net def p n st\n' +
+  '  def=$(ip -4 route show default 2>/dev/null | awk \'{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }\')\n' +
+  '  for p in "$sysnet/$def" "$sysnet"/*; do\n' +
+  '    n=${p##*/}\n' +
+  '    net_is_physical_eth "$p" || continue\n' +
+  '    st=$(cat "$p/operstate" 2>/dev/null)\n' +
+  '    if [[ "$st" != up ]]; then\n' +
+  '      [[ "$st" == unknown && "$(cat "$p/carrier" 2>/dev/null)" == 1 ]] || continue\n' +
+  '    fi\n' +
+  '    ip -4 -o addr show dev "$n" scope global 2>/dev/null | grep -q . || continue\n' +
+  '    printf "%s" "$n"\n' +
+  '    return 0\n' +
+  '  done\n' +
+  '  return 1\n' +
+  '}\n' +
+  '# Prints the first physical ethernet NIC regardless of link state (idle-NIC fallback).\n' +
+  'first_eth() {\n' +
+  '  local p\n' +
+  '  for p in /sys/class/net/*; do\n' +
+  '    net_is_physical_eth "$p" || continue\n' +
+  '    printf "%s" "${p##*/}"\n' +
+  '    return 0\n' +
+  '  done\n' +
+  '  return 1\n' +
+  '}\n'
+
+// Runs as root through pkexec. Verifies create_ap's shared /tmp state before
+// create_ap runs (it kill -9s PIDs read from files there) and never sees a
+// passphrase: that reaches create_ap only through a private --config file.
+var createApRootHelper =
+  '# create-ap-root <start|stop> [create_ap args]\n' +
+  '# Runs as root (pkexec). create_ap keeps shared state in /tmp/create_ap.common.conf\n' +
+  '# and, on cleanup, runs kill -9 on whatever PID is written in its *.pid files. Any\n' +
+  '# local user can pre-create that directory in /tmp, so it is verified (or replaced)\n' +
+  '# here, inside the privileged context, before create_ap ever touches it. No\n' +
+  '# passphrase is passed through here: create_ap reads it from a private --config file.\n' +
+  'set -u\n' +
+  'umask 022\n' +
+  'common=/tmp/create_ap.common.conf\n' +
+  '\n' +
+  'harden_common() {\n' +
+  '  local mode f\n' +
+  '  if [[ ! -k /tmp ]]; then\n' +
+  '    echo "Refusing to run: /tmp is not sticky" >&2\n' +
+  '    return 1\n' +
+  '  fi\n' +
+  '  if [[ -L "$common" ]]; then\n' +
+  '    rm -f -- "$common" || return 1\n' +
+  '  fi\n' +
+  '  if [[ -e "$common" ]]; then\n' +
+  '    mode=$(stat -c %a -- "$common" 2>/dev/null || echo 777)\n' +
+  '    if [[ ! -d "$common" || "$(stat -c %u -- "$common" 2>/dev/null)" != 0 || $(( 8#$mode & 8#022 )) -ne 0 ]]; then\n' +
+  '      rm -rf --one-file-system -- "$common" || return 1\n' +
+  '    fi\n' +
+  '  fi\n' +
+  '  if [[ ! -e "$common" ]]; then\n' +
+  '    mkdir -m 0755 -- "$common" 2>/dev/null || true\n' +
+  '  fi\n' +
+  '  if [[ -L "$common" || ! -d "$common" || "$(stat -c %u -- "$common" 2>/dev/null)" != 0 ]]; then\n' +
+  '    echo "Refusing to run: cannot secure $common" >&2\n' +
+  '    return 1\n' +
+  '  fi\n' +
+  '  for f in "$common"/*.pid; do\n' +
+  '    [[ -e "$f" || -L "$f" ]] || continue\n' +
+  '    if [[ -L "$f" || ! -f "$f" || "$(stat -c %u -- "$f" 2>/dev/null)" != 0 ]]; then\n' +
+  '      rm -f -- "$f"\n' +
+  '    fi\n' +
+  '  done\n' +
+  '  return 0\n' +
+  '}\n' +
+  '\n' +
+  'is_create_ap_pid() {\n' +
+  '  [[ "$1" =~ ^[0-9]+$ && -r "/proc/$1/cmdline" ]] || return 1\n' +
+  '  tr "\\0" " " < "/proc/$1/cmdline" 2>/dev/null | grep -q create_ap\n' +
+  '}\n' +
+  '\n' +
+  'owned_by_root() {\n' +
+  '  [[ -e "$1" && ! -L "$1" && "$(stat -c %u -- "$1" 2>/dev/null)" == 0 ]]\n' +
+  '}\n' +
+  '\n' +
+  '# Stale dnsmasq left behind by a create_ap instance that is no longer running.\n' +
+  'reap_stale_dnsmasq() {\n' +
+  '  local d pid dp\n' +
+  '  for d in /tmp/create_ap.*.conf.*; do\n' +
+  '    [[ -d "$d" ]] && owned_by_root "$d" || continue\n' +
+  '    pid=$(cat "$d/pid" 2>/dev/null)\n' +
+  '    is_create_ap_pid "$pid" && continue\n' +
+  '    owned_by_root "$d/dnsmasq.pid" || continue\n' +
+  '    dp=$(cat "$d/dnsmasq.pid" 2>/dev/null)\n' +
+  '    [[ "$dp" =~ ^[0-9]+$ && -r "/proc/$dp/cmdline" ]] || continue\n' +
+  '    if tr "\\0" " " < "/proc/$dp/cmdline" 2>/dev/null | grep -q dnsmasq; then\n' +
+  '      kill "$dp" 2>/dev/null || true\n' +
+  '    fi\n' +
+  '  done\n' +
+  '}\n' +
+  '\n' +
+  'case "${1:-}" in\n' +
+  '  start)\n' +
+  '    shift\n' +
+  '    harden_common || exit 1\n' +
+  '    reap_stale_dnsmasq\n' +
+  '    exec create_ap "$@"\n' +
+  '    ;;\n' +
+  '  stop)\n' +
+  '    harden_common || exit 1\n' +
+  '    for d in /tmp/create_ap.*.conf.*; do\n' +
+  '      [[ -d "$d" ]] && owned_by_root "$d" && owned_by_root "$d/pid" || continue\n' +
+  '      pid=$(cat "$d/pid" 2>/dev/null)\n' +
+  '      is_create_ap_pid "$pid" && create_ap --stop "$pid" >/dev/null 2>&1\n' +
+  '    done\n' +
+  '    reap_stale_dnsmasq\n' +
+  '    exit 0\n' +
+  '    ;;\n' +
+  '  *)\n' +
+  '    exit 2\n' +
+  '    ;;\n' +
+  'esac\n'
+
 var wiredQueryScript =
-  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2 == "ethernet" && $1 !~ /^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt)/ { print $1; exit }\'); ' +
-  'con_uuid=$(nmcli -t -f UUID,TYPE connection show --active 2>/dev/null | awk -F: \'$2 == "802-3-ethernet" || $2 == "ethernet" { print $1; exit }\'); ' +
-  'if [[ -z "$con_uuid" ]]; then ' +
-  '  con_uuid=$(nmcli -t -f UUID,TYPE connection show 2>/dev/null | awk -F: \'$2 == "802-3-ethernet" || $2 == "ethernet" { print $1; exit }\'); ' +
-  'fi; ' +
-  'con=""; ' +
-  'if [[ -n "$con_uuid" ]]; then ' +
-  '  con=$(nmcli -g connection.id connection show uuid "$con_uuid" 2>/dev/null); ' +
-  'fi; ' +
-  'if [[ -z "$con" && -n "$dev" ]]; then con="Wired connection 1"; fi; ' +
-  'if [[ -n "$con" ]]; then ' +
-  '  if nmcli connection show id "$con" >/dev/null 2>&1; then ' +
-  '    method=$(nmcli -g ipv4.method connection show id "$con" 2>/dev/null || echo "auto"); ' +
-  '    addr=$(nmcli -g ipv4.addresses connection show id "$con" 2>/dev/null || echo ""); ' +
-  '    gw=$(nmcli -g ipv4.gateway connection show id "$con" 2>/dev/null || echo ""); ' +
-  '    dns=$(nmcli -g ipv4.dns connection show id "$con" 2>/dev/null || echo ""); ' +
-  '  else ' +
-  '    method="auto"; addr=""; gw=""; dns=""; ' +
-  '  fi; ' +
-  '  jq -nc --arg con "$con" --arg dev "${dev:-}" --arg method "${method:-auto}" --arg addr "${addr:-}" --arg gw "${gw:-}" --arg dns "${dns:-}" ' +
-  '    \'{name: $con, device: $dev, method: $method, addresses: $addr, gateway: $gw, dns: $dns}\'; ' +
-  'else ' +
-  '  echo "{}"; ' +
-  'fi'
+  ethDetectFunction +
+  'dev=$(detect_eth)\n' +
+  'if [[ -z "$dev" ]]; then dev=$(first_eth); fi\n' +
+  'con_uuid=""\n' +
+  'if [[ -n "$dev" ]]; then\n' +
+  '  con_uuid=$(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null | awk -F: -v d="$dev" \'($2 == "802-3-ethernet" || $2 == "ethernet") && $3 == d { print $1; exit }\')\n' +
+  'fi\n' +
+  'if [[ -z "$con_uuid" ]]; then\n' +
+  '  con_uuid=$(nmcli -t -f UUID,TYPE connection show --active 2>/dev/null | awk -F: \'$2 == "802-3-ethernet" || $2 == "ethernet" { print $1; exit }\')\n' +
+  'fi\n' +
+  'if [[ -z "$con_uuid" && -n "$dev" ]]; then\n' +
+  '  for u in $(nmcli -t -f UUID,TYPE connection show 2>/dev/null | awk -F: \'$2 == "802-3-ethernet" || $2 == "ethernet" { print $1 }\'); do\n' +
+  '    if [[ "$(nmcli -g connection.interface-name connection show uuid "$u" 2>/dev/null)" == "$dev" ]]; then con_uuid="$u"; break; fi\n' +
+  '  done\n' +
+  'fi\n' +
+  'if [[ -z "$con_uuid" ]]; then\n' +
+  '  con_uuid=$(nmcli -t -f UUID,TYPE connection show 2>/dev/null | awk -F: \'$2 == "802-3-ethernet" || $2 == "ethernet" { print $1; exit }\')\n' +
+  'fi\n' +
+  'con=""\n' +
+  'if [[ -n "$con_uuid" ]]; then\n' +
+  '  con=$(nmcli -g connection.id connection show uuid "$con_uuid" 2>/dev/null)\n' +
+  'fi\n' +
+  'if [[ -z "$con" && -n "$dev" ]]; then con="Wired connection 1"; fi\n' +
+  'if [[ -n "$con" ]]; then\n' +
+  '  if nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
+  '    method=$(nmcli -g ipv4.method connection show id "$con" 2>/dev/null || echo "auto")\n' +
+  '    addr=$(nmcli -g ipv4.addresses connection show id "$con" 2>/dev/null || echo "")\n' +
+  '    gw=$(nmcli -g ipv4.gateway connection show id "$con" 2>/dev/null || echo "")\n' +
+  '    dns=$(nmcli -g ipv4.dns connection show id "$con" 2>/dev/null || echo "")\n' +
+  '  else\n' +
+  '    method="auto"; addr=""; gw=""; dns=""\n' +
+  '  fi\n' +
+  '  jq -nc --arg con "$con" --arg dev "${dev:-}" --arg method "${method:-auto}" --arg addr "${addr:-}" --arg gw "${gw:-}" --arg dns "${dns:-}" \\\n' +
+  '    \'{name: $con, device: $dev, method: $method, addresses: $addr, gateway: $gw, dns: $dns}\'\n' +
+  'else\n' +
+  '  echo "{}"\n' +
+  'fi\n'
 
 var wiredApplyScript =
-  'con="$1"; method="$2"; addr="$3"; gw="$4"; dns="$5"; ' +
-  'con=$(printf "%s" "$con" | tr -d "\\r\\n"); ' +
-  'if [[ -z "$con" || "$con" == -* ]]; then con="Wired connection 1"; fi; ' +
-  'if [[ "$method" != "manual" ]]; then method="auto"; fi; ' +
-  'validate_ipv4() { ' +
-  '  local ip=$1; ' +
-  '  [[ $ip =~ ^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || return 1; ' +
-  '  local IFS=.; ' +
-  '  local -a octets=($ip); ' +
-  '  [[ ${#octets[@]} -eq 4 ]] || return 1; ' +
-  '  for o in "${octets[@]}"; do ' +
-  '    [[ $o =~ ^(0|[1-9][0-9]*)$ ]] || return 1; ' +
-  '    (( o >= 0 && o <= 255 )) || return 1; ' +
-  '  done; ' +
-  '  return 0; ' +
-  '}; ' +
-  'validate_cidr() { ' +
-  '  local entry=$1; ' +
-  '  local ip=${entry%/*}; ' +
-  '  local pfx=""; ' +
-  '  if [[ "$entry" == *"/"* ]]; then ' +
-  '    pfx=${entry#*/}; ' +
-  '    [[ "$pfx" =~ ^[0-9]+$ ]] && (( pfx >= 0 && pfx <= 32 )) || return 1; ' +
-  '  fi; ' +
-  '  validate_ipv4 "$ip" || return 1; ' +
-  '  return 0; ' +
-  '}; ' +
-  'if ! nmcli connection show id "$con" >/dev/null 2>&1; then ' +
-  '  dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2 == "ethernet" && $1 !~ /^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt)/ { print $1; exit }\'); ' +
-  '  if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi; ' +
-  '  if ! nm_out=$(nmcli connection add type ethernet con-name "$con" ${dev:+ifname "$dev"} 2>&1); then ' +
-  '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '    echo "Failed to create wired connection: ${err_detail:-$nm_out}" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  'fi; ' +
-  'if [[ "$method" == "manual" ]]; then ' +
-  '  addr=$(printf "%s" "$addr" | tr -d "\\r\\n"); ' +
-  '  gw=$(printf "%s" "$gw" | tr -d "\\r\\n"); ' +
-  '  dns=$(printf "%s" "$dns" | tr -d "\\r\\n"); ' +
-  '  if [[ "$addr" != */* && -n "$addr" ]]; then addr="${addr}/24"; fi; ' +
-  '  addr_clean="${addr//,/ }"; ' +
-  '  [[ -z "$addr_clean" ]] && { echo "IP address is required for Static IP" >&2; exit 1; }; ' +
-  '  for a in $addr_clean; do ' +
-  '    if ! validate_cidr "$a"; then ' +
-  '      echo "Invalid IPv4 address format: $a" >&2; ' +
-  '      exit 1; ' +
-  '    fi; ' +
-  '  done; ' +
-  '  if [[ -n "$gw" ]] && ! validate_ipv4 "$gw"; then ' +
-  '    echo "Invalid Gateway IP format: $gw" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  '  if [[ -n "$dns" ]]; then ' +
-  '    dns_clean="${dns//,/ }"; ' +
-  '    for d in $dns_clean; do ' +
-  '      if ! validate_ipv4 "$d"; then ' +
-  '        echo "Invalid DNS format: $d" >&2; ' +
-  '        exit 1; ' +
-  '      fi; ' +
-  '    done; ' +
-  '  fi; ' +
-  '  if ! nm_out=$(nmcli connection modify id "$con" ipv4.method manual ipv4.addresses "$addr" ipv4.gateway "${gw:-}" ipv4.dns "${dns:-}" 2>&1); then ' +
-  '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '    echo "Failed to update wired connection: ${err_detail:-$nm_out}" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  'else ' +
-  '  if ! nm_out=$(nmcli connection modify id "$con" ipv4.method auto ipv4.addresses "" ipv4.gateway "" ipv4.dns "" 2>&1); then ' +
-  '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '    echo "Failed to update wired connection: ${err_detail:-$nm_out}" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  'fi; ' +
-  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2 == "ethernet" && $1 !~ /^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt)/ { print $1; exit }\'); ' +
-  'if [[ -n "$dev" && "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then ' +
-  '  nmcli device reapply "$dev" 2>/dev/null || nmcli connection up id "$con" 2>/dev/null || true; ' +
-  'else ' +
-  '  nmcli connection up id "$con" 2>/dev/null || true; ' +
-  'fi'
+  ethDetectFunction +
+  'con="$1"; method="$2"; addr="$3"; gw="$4"; dns="$5"\n' +
+  'con=$(printf "%s" "$con" | tr -d "\\r\\n")\n' +
+  'if [[ -z "$con" || "$con" == -* ]]; then con="Wired connection 1"; fi\n' +
+  'if [[ "$method" != "manual" ]]; then method="auto"; fi\n' +
+  'validate_ipv4() {\n' +
+  '  local ip=$1\n' +
+  '  [[ $ip =~ ^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || return 1\n' +
+  '  local IFS=.\n' +
+  '  local -a octets=($ip)\n' +
+  '  [[ ${#octets[@]} -eq 4 ]] || return 1\n' +
+  '  for o in "${octets[@]}"; do\n' +
+  '    [[ $o =~ ^(0|[1-9][0-9]*)$ ]] || return 1\n' +
+  '    (( o >= 0 && o <= 255 )) || return 1\n' +
+  '  done\n' +
+  '  return 0\n' +
+  '}\n' +
+  'validate_cidr() {\n' +
+  '  local entry=$1\n' +
+  '  local ip=${entry%/*}\n' +
+  '  local pfx=""\n' +
+  '  if [[ "$entry" == *"/"* ]]; then\n' +
+  '    pfx=${entry#*/}\n' +
+  '    [[ "$pfx" =~ ^[0-9]+$ ]] && (( pfx >= 0 && pfx <= 32 )) || return 1\n' +
+  '  fi\n' +
+  '  validate_ipv4 "$ip" || return 1\n' +
+  '  return 0\n' +
+  '}\n' +
+  'fail() { echo "$1" >&2; exit 1; }\n' +
+  'nm_error() { echo "$1" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'; }\n' +
+  '\n' +
+  'if [[ "$method" == "manual" ]]; then\n' +
+  '  addr=$(printf "%s" "$addr" | tr -d "\\r\\n")\n' +
+  '  gw=$(printf "%s" "$gw" | tr -d "\\r\\n")\n' +
+  '  dns=$(printf "%s" "$dns" | tr -d "\\r\\n")\n' +
+  '  if [[ "$addr" != */* && -n "$addr" ]]; then addr="${addr}/24"; fi\n' +
+  '  addr_clean="${addr//,/ }"\n' +
+  '  [[ -z "$addr_clean" ]] && fail "IP address is required for Static IP"\n' +
+  '  for a in $addr_clean; do\n' +
+  '    validate_cidr "$a" || fail "Invalid IPv4 address format: $a"\n' +
+  '  done\n' +
+  '  if [[ -n "$gw" ]] && ! validate_ipv4 "$gw"; then fail "Invalid Gateway IP format: $gw"; fi\n' +
+  '  if [[ -n "$dns" ]]; then\n' +
+  '    for d in ${dns//,/ }; do\n' +
+  '      validate_ipv4 "$d" || fail "Invalid DNS format: $d"\n' +
+  '    done\n' +
+  '  fi\n' +
+  'fi\n' +
+  '\n' +
+  '# The NIC that is actually up (kernel view); an idle NIC only as a fallback.\n' +
+  'dev=$(detect_eth)\n' +
+  'if [[ -z "$dev" ]]; then dev=$(first_eth); fi\n' +
+  'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi\n' +
+  '\n' +
+  'if ! nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
+  '  if ! nm_out=$(nmcli connection add type ethernet con-name "$con" ${dev:+ifname "$dev"} 2>&1); then\n' +
+  '    err=$(nm_error "$nm_out")\n' +
+  '    fail "Failed to create wired connection: ${err:-$nm_out}"\n' +
+  '  fi\n' +
+  'fi\n' +
+  'uuid=$(nmcli -g connection.uuid connection show id "$con" 2>/dev/null | head -n 1)\n' +
+  '[[ -n "$uuid" ]] || fail "Failed to find wired connection: $con"\n' +
+  '\n' +
+  'if [[ "$method" == "manual" ]]; then\n' +
+  '  if ! nm_out=$(nmcli connection modify uuid "$uuid" ipv4.method manual ipv4.addresses "$addr" ipv4.gateway "${gw:-}" ipv4.dns "${dns:-}" 2>&1); then\n' +
+  '    fail "Failed to update wired connection: $(nm_error "$nm_out")"\n' +
+  '  fi\n' +
+  'else\n' +
+  '  if ! nm_out=$(nmcli connection modify uuid "$uuid" ipv4.method auto ipv4.addresses "" ipv4.gateway "" ipv4.dns "" 2>&1); then\n' +
+  '    fail "Failed to update wired connection: $(nm_error "$nm_out")"\n' +
+  '  fi\n' +
+  'fi\n' +
+  '\n' +
+  '# Apply without dropping the link. Only this profile on its own device is ever touched:\n' +
+  '# another connection that happens to be active on the NIC is never displaced.\n' +
+  'act_dev=$(nmcli -t -f UUID,DEVICE connection show --active 2>/dev/null | awk -F: -v u="$uuid" \'$1 == u && $2 != "" { print $2; exit }\')\n' +
+  'if [[ -n "$act_dev" && "$act_dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then\n' +
+  '  # Live profile: re-apply in place; a full re-activation is the last resort.\n' +
+  '  if ! nmcli device reapply "$act_dev" >/dev/null 2>&1; then\n' +
+  '    nmcli connection up uuid "$uuid" ifname "$act_dev" >/dev/null 2>&1 || true\n' +
+  '  fi\n' +
+  'elif [[ -n "$dev" ]]; then\n' +
+  '  st=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$dev" \'$1 == d { print $2; exit }\')\n' +
+  '  if [[ "$st" == "disconnected" ]]; then\n' +
+  '    nmcli connection up uuid "$uuid" ifname "$dev" >/dev/null 2>&1 || true\n' +
+  '  fi\n' +
+  'fi\n' +
+  'exit 0\n'
 
 var hotspotQueryScript =
+  ethDetectFunction +
   'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
   'has_ap="false"; ' +
   'if [[ -n "$dev" ]] && iw list 2>/dev/null | grep -A 8 "Supported interface modes" | grep -q "AP"; then has_ap="true"; fi; ' +
   'has_create_ap="false"; ' +
   'if command -v create_ap >/dev/null 2>&1; then has_create_ap="true"; fi; ' +
+  'eth_dev=$(detect_eth); ' +
   'eth_connected="false"; ' +
-  'if nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null | awk -F: \'$2 == "ethernet" && $1 !~ /^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt)/ && $3 == "connected" { found=1 } END { exit (found ? 0 : 1) }\'; then eth_connected="true"; fi; ' +
+  'if [[ -n "$eth_dev" ]]; then eth_connected="true"; fi; ' +
   'wifi_connected="false"; ' +
   'if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q -F -x "${dev}:connected"; then wifi_connected="true"; fi; ' +
   'repeater_capable="false"; ' +
@@ -496,13 +665,14 @@ var hotspotQueryScript =
   '    fi; ' +
   '  fi; ' +
   'fi; ' +
-  '  cap_running="false"; cap_ssid=""; cap_pwd=""; cap_band="bg"; cap_iface=""; ' +
+  '  cap_running="false"; cap_ssid=""; cap_pwd=""; cap_band="bg"; cap_iface=""; cap_uplink=""; ' +
   'for d in /tmp/create_ap.*.conf.*; do ' +
   '  if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
   '    if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
   '      pid=$(cat "$d/pid" 2>/dev/null); ' +
   '      if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" && $(stat -c \'%u\' "/proc/$pid" 2>/dev/null) -eq 0 ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
   '        cap_running="true"; ' +
+  '        cap_uplink=$(cat "$d/nat_internet_iface" 2>/dev/null); ' +
   '        viface=$(cat "$d/wifi_iface" 2>/dev/null); ' +
   '        if [[ -n "$viface" && "$viface" =~ ^[a-zA-Z0-9_.-]+$ && -d "/sys/class/net/$viface" ]]; then ' +
   '          cap_iface="$viface"; ' +
@@ -531,11 +701,11 @@ var hotspotQueryScript =
   'fi; ' +
   'ap_iface=""; ' +
   'if [[ "$cap_running" == "true" ]]; then ' +
-  '  active="true"; is_repeater="true"; ssid="${cap_ssid:-$nm_ssid}"; pwd="${nm_pwd:-$cap_pwd}"; band="$cap_band"; ap_iface="$cap_iface"; ' +
+  '  active="true"; is_repeater="true"; if [[ -n "$cap_uplink" && "$cap_uplink" != "$dev" ]]; then is_repeater="false"; fi; ssid="${cap_ssid:-$nm_ssid}"; pwd="${nm_pwd:-$cap_pwd}"; band="$cap_band"; ap_iface="$cap_iface"; ' +
   'elif [[ "$nm_active" == "true" ]]; then ' +
-  '  active="true"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; band="${nm_band:-bg}"; ap_iface="$dev"; ' +
+  '  active="true"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-}"; band="${nm_band:-bg}"; ap_iface="$dev"; ' +
   'else ' +
-  '  active="false"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-omarchy12345}"; ' +
+  '  active="false"; is_repeater="false"; ssid="${nm_ssid:-Omarchy-Hotspot}"; pwd="${nm_pwd:-}"; ' +
   '  if [[ "$wifi_connected" == "true" && -n "$connected_band" ]]; then band="$connected_band"; else band="${nm_band:-bg}"; fi; ' +
   '  ap_iface=""; ' +
   'fi; ' +
@@ -637,7 +807,7 @@ var hotspotQueryScript =
   '  if [[ -z "$client_json" || "$client_json" != "["*"]" ]]; then client_json="[]"; fi; ' +
   'fi; ' +
   'clients=$(echo "$client_json" | jq "length" 2>/dev/null || echo 0); ' +
-  'printf "%s" "${pwd:-omarchy12345}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
+  'printf "%s" "${pwd:-}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
   '  \'{"name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "clientList": $clientList, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "wifiConnected": $wifiConnected, "connectedBand": $connectedBand, "ethernetConnected": $ethernetConnected, "repeaterCapable": $repeaterCapable}\''
 
 // The password arrives on stdin and reaches nmcli through the scriptable
@@ -645,221 +815,252 @@ var hotspotQueryScript =
 // argv is world-readable in /proc, so the secret must never be an argument
 // (printf is a bash builtin, so no process spawns with it either).
 var hotspotApplyScript =
-  'IFS= read -r pwd; ' +
-  'pwd=$(printf "%s" "$pwd" | tr -d "\\r\\n"); ' +
-  'action="$1"; con="$2"; ssid="$3"; band="$4"; ' +
-  'if [[ "$action" != "save" && "$action" != "toggle" && "$action" != "stop" ]]; then exit 1; fi; ' +
-  'con=$(printf "%s" "$con" | tr -d "\\r\\n"); ' +
-  'if [[ -z "$con" || "$con" == -* ]]; then con="Hotspot"; fi; ' +
-  'ssid=$(printf "%s" "$ssid" | tr -d "\\r\\n"); ' +
-  'if [[ -z "$ssid" || ${#ssid} -gt 32 || "$ssid" =~ [^[:print:]] ]]; then ssid="Omarchy-Hotspot"; fi; ' +
-  'if [[ -z "$pwd" ]]; then pwd="omarchy12345"; fi; ' +
-  'if [[ ${#pwd} -lt 8 || ${#pwd} -gt 63 || "$pwd" =~ [^[:print:]] ]]; then ' +
-  '  echo "Invalid password: must be 8-63 printable ASCII characters" >&2; ' +
-  '  exit 1; ' +
-  'fi; ' +
-  'if [[ "$band" != "a" ]]; then band="bg"; fi; ' +
-  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\'); ' +
-  'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi; ' +
-  'if [[ "$action" == "save" ]]; then ' +
-  '  if ! nmcli connection show id "$con" >/dev/null 2>&1; then ' +
-  '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
-  '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      802-11-wireless-security.proto rsn ' +
-  '      802-11-wireless-security.pairwise ccmp ' +
-  '      802-11-wireless-security.group ccmp ' +
-  '      802-11-wireless-security.pmf 1 ' +
-  '      ipv4.method shared ipv6.method ignore ${dev:+ifname "$dev"} 2>&1); then ' +
-  '      err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '      echo "Failed to create hotspot connection: ${err_detail:-$nm_out}" >&2; ' +
-  '      exit 1; ' +
-  '    fi; ' +
-  '  else ' +
-  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      802-11-wireless-security.proto rsn ' +
-  '      802-11-wireless-security.pairwise ccmp ' +
-  '      802-11-wireless-security.group ccmp ' +
-  '      802-11-wireless-security.pmf 1 ' +
-  '      ipv6.method ignore >/dev/null 2>&1 || true; ' +
-  '  fi; ' +
-  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then ' +
-  '    echo "Failed to configure hotspot password" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  '  exit 0; ' +
-  'fi; ' +
-  'is_running="false"; running_pid=""; ' +
-  'for d in /tmp/create_ap.*.conf.*; do ' +
-  '  if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
-  '    if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
-  '      pid=$(cat "$d/pid" 2>/dev/null); ' +
-  '      if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" && $(stat -c \'%u\' "/proc/$pid" 2>/dev/null) -eq 0 ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
-  '        is_running="true"; running_pid="$pid"; break; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '  fi; ' +
-  'done; ' +
-  'if [[ "$is_running" == "false" ]] && nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con}:yes"; then ' +
-  '  is_running="true"; ' +
-  'fi; ' +
-  'if [[ "$action" == "stop" ]] || [[ "$action" == "toggle" && "$is_running" == "true" ]]; then ' +
-  '  if [[ -n "$running_pid" && "$running_pid" =~ ^[0-9]+$ ]]; then ' +
-  '    pkexec create_ap --stop "$running_pid" >/dev/null 2>&1 || true; ' +
-  '  fi; ' +
-  '  for d in /tmp/create_ap.*.conf.*; do ' +
-  '    if [[ -d "$d" && ! -L "$d" && -f "$d/dnsmasq.pid" && ! -L "$d/dnsmasq.pid" ]]; then ' +
-  '      dp=$(cat "$d/dnsmasq.pid" 2>/dev/null); ' +
-  '      if [[ -n "$dp" && "$dp" =~ ^[0-9]+$ && -d "/proc/$dp" ]] && grep -q "dnsmasq" "/proc/$dp/cmdline" 2>/dev/null; then ' +
-  '        pkexec kill "$dp" >/dev/null 2>&1 || true; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '    if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
-  '      if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
-  '        p=$(cat "$d/pid" 2>/dev/null); ' +
-  '        if [[ -n "$p" && "$p" =~ ^[0-9]+$ && -d "/proc/$p" ]] && grep -q "create_ap" "/proc/$p/cmdline" 2>/dev/null; then ' +
-  '          pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
-  '        fi; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '  done; ' +
-  '  if [[ -n "$dev" ]]; then ' +
-  '    pkexec create_ap --stop "$dev" >/dev/null 2>&1 || true; ' +
-  '    for p in $(pgrep -u 0 -f "create_ap" 2>/dev/null); do ' +
-  '      if [[ "$p" =~ ^[0-9]+$ ]]; then ' +
-  '        pkexec create_ap --stop "$p" >/dev/null 2>&1 || true; ' +
-  '      fi; ' +
-  '    done; ' +
-  '  fi; ' +
-  '  nmcli con down id "$con" >/dev/null 2>&1 || true; ' +
-  '  exit 0; ' +
-  'fi; ' +
-  'eth_connected="false"; ' +
-  'if nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null | awk -F: \'$2 == "ethernet" && $1 !~ /^(veth|docker|br-|virbr|lo|dummy|tap|tun|tailscale|wg|zt)/ && $3 == "connected" { found=1 } END { exit (found ? 0 : 1) }\'; then eth_connected="true"; fi; ' +
-  'wifi_connected="false"; ' +
-  'if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q -F -x "${dev}:connected"; then ' +
-  '  wifi_connected="true"; ' +
-  'fi; ' +
-  'if [[ "$wifi_connected" == "true" ]]; then ' +
-  '  if ! command -v create_ap >/dev/null 2>&1; then ' +
-  '    echo "Wi-Fi is connected. Install linux-wifi-hotspot for simultaneous repeater chaining." >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  '  freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1); ' +
-  '  if [[ -n "$freq" && "$freq" =~ ^[0-9]+$ ]]; then ' +
-  '    phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0"); ' +
-  '    if [[ "$phy" =~ ^phy[0-9]+$ ]]; then ' +
-  '      ch_info=$(iw phy "$phy" info 2>/dev/null | grep -E "\\* ${freq}\\.[0-9]+ MHz"); ' +
-  '      if [[ "$ch_info" == *"no IR"* ]]; then ' +
-  '        echo "Cannot repeat: current 5GHz Wi-Fi channel is restricted (no-IR) by card firmware. Connect to 2.4GHz Wi-Fi to repeat." >&2; ' +
-  '        exit 1; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '  fi; ' +
-  '  for d in /tmp/create_ap.*.conf.*; do ' +
-  '    if [[ -d "$d" && ! -L "$d" && -f "$d/dnsmasq.pid" && ! -L "$d/dnsmasq.pid" ]]; then ' +
-  '      dp=$(cat "$d/dnsmasq.pid" 2>/dev/null); ' +
-  '      if [[ -n "$dp" && "$dp" =~ ^[0-9]+$ && -d "/proc/$dp" ]] && grep -q "dnsmasq" "/proc/$dp/cmdline" 2>/dev/null; then ' +
-  '        pkexec kill "$dp" >/dev/null 2>&1 || true; ' +
-  '      fi; ' +
-  '    fi; ' +
-  '  done; ' +
-  '  gw="192.168.12.1"; ' +
-  '  if ip route show 2>/dev/null | grep -q "192.168.12\\."; then gw="192.168.13.1"; fi; ' +
-  '  up_dns=$(resolvectl dns "$dev" 2>/dev/null | awk \'{$1=""; print $0}\' | tr \' \' \'\\n\' | grep -E \'^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\' | grep -v \'^127\\.\' | paste -sd, -); ' +
-  '  if [[ -n "$up_dns" ]]; then dns_servers="$up_dns"; else dns_servers="1.1.1.1,8.8.8.8"; fi; ' +
-  '  cap_sec_dir=$(mktemp -d /tmp/create_ap_sec.XXXXXX); ' +
-  '  chmod 700 "$cap_sec_dir"; ' +
-  '  cap_conf="$cap_sec_dir/ap.conf"; ' +
-  '  cap_log="$cap_sec_dir/ap.log"; ' +
-  '  touch "$cap_conf" "$cap_log"; ' +
-  '  chmod 600 "$cap_conf" "$cap_log"; ' +
-  '  printf "WIFI_IFACE=%s\\nINTERNET_IFACE=%s\\nSSID=%s\\nPASSPHRASE=%s\\nGATEWAY=%s\\nCHANNEL=default\\nFREQ_BAND=default\\nDHCP_DNS=%s\\nIEEE80211N=1\\nHT_CAPAB=[SHORT-GI-20]\\nDAEMONIZE=1\\n" "$dev" "$dev" "$ssid" "$pwd" "$gw" "$dns_servers" > "$cap_conf"; ' +
-  '  trap \'rm -rf "$cap_sec_dir"\' EXIT HUP INT QUIT TERM; ' +
-  '  pkexec create_ap --config "$cap_conf" > "$cap_log" 2>&1; ' +
-  '  pk_status=$?; ' +
-  '  if [[ $pk_status -ne 0 ]] && grep -qi "not authorized" "$cap_log" 2>/dev/null; then ' +
-  '    echo "Hotspot start cancelled: polkit authorization denied or dismissed." >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  '  for i in {1..14}; do ' +
-  '    sleep 0.5; ' +
-  '    for d in /tmp/create_ap.*.conf.*; do ' +
-  '      if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
-  '        if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
-  '          pid=$(cat "$d/pid" 2>/dev/null); ' +
-  '          if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" && $(stat -c \'%u\' "/proc/$pid" 2>/dev/null) -eq 0 ]] && grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null; then ' +
-  '            viface=$(cat "$d/wifi_iface" 2>/dev/null); ' +
-  '            if [[ -n "$viface" && "$viface" =~ ^[a-zA-Z0-9_.-]+$ && -d "/sys/class/net/$viface" ]]; then ' +
-  '              exit 0; ' +
-  '            fi; ' +
-  '          fi; ' +
-  '        fi; ' +
-  '      fi; ' +
-  '    done; ' +
-  '  done; ' +
-  '  if grep -qi "rf-kill" "$cap_log" 2>/dev/null; then ' +
-  '    echo "Cannot start repeater: Wi-Fi is soft-blocked by rfkill. Run \'rfkill unblock wifi\'." >&2; ' +
-  '  elif grep -qi "does not fully support virtual interfaces" "$cap_log" 2>/dev/null; then ' +
-  '    echo "Repeater error: Wi-Fi card cannot repeat on this band/channel simultaneously." >&2; ' +
-  '  elif grep -qi "not authorized" "$cap_log" 2>/dev/null; then ' +
-  '    echo "Hotspot start cancelled: polkit authorization denied or dismissed." >&2; ' +
-  '  else ' +
-  '    err_line=$(grep -m 1 -E "^(ERROR|RTNETLINK):" "$cap_log" 2>/dev/null | sed -e \'s/^ERROR:[[:space:]]*//\'); ' +
-  '    if [[ -n "$err_line" ]]; then ' +
-  '      echo "Repeater error: $err_line" >&2; ' +
-  '    elif [[ -n "$freq" ]]; then ' +
-  '      cur_band="2.4GHz"; if [[ "$freq" -gt 5000 ]]; then cur_band="5GHz"; fi; ' +
-  '      echo "Repeater failed: Wi-Fi card cannot broadcast AP while connected to $cur_band (${freq} MHz)." >&2; ' +
-  '    else ' +
-  '      echo "Failed to start repeater: verify your Wi-Fi interface and ensure the active Wi-Fi channel is not restricted." >&2; ' +
-  '    fi; ' +
-  '  fi; ' +
-  '  exit 1; ' +
-  'else ' +
-  '  nmcli radio wifi on >/dev/null 2>&1 || true; ' +
-  '  if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q -F -x "${dev}:connected"; then ' +
-  '    nmcli dev disconnect "$dev" >/dev/null 2>&1 || true; ' +
-  '  fi; ' +
-  '  if [[ "$band" == "a" && -n "$dev" ]]; then ' +
-  '    phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0"); ' +
-  '    if [[ "$phy" =~ ^phy[0-9]+$ ]] && ! iw phy "$phy" info 2>/dev/null | grep -A 40 "Frequencies:" | grep -E "5[0-9]{3} MHz" | grep -v "no IR" | grep -q "MHz"; then ' +
-  '      band="bg"; ' +
-  '    fi; ' +
-  '  fi; ' +
-  '  if ! nmcli connection show id "$con" >/dev/null 2>&1; then ' +
-  '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" ' +
-  '      802-11-wireless.mode ap 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      802-11-wireless-security.proto rsn ' +
-  '      802-11-wireless-security.pairwise ccmp ' +
-  '      802-11-wireless-security.group ccmp ' +
-  '      802-11-wireless-security.pmf 1 ' +
-  '      ipv4.method shared ipv6.method ignore ${dev:+ifname "$dev"} 2>&1); then ' +
-  '      err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '      echo "Failed to create hotspot: ${err_detail:-$nm_out}" >&2; ' +
-  '      exit 1; ' +
-  '    fi; ' +
-  '  else ' +
-  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" ' +
-  '      802-11-wireless-security.key-mgmt wpa-psk ' +
-  '      802-11-wireless-security.proto rsn ' +
-  '      802-11-wireless-security.pairwise ccmp ' +
-  '      802-11-wireless-security.group ccmp ' +
-  '      802-11-wireless-security.pmf 1 ' +
-  '      ipv6.method ignore >/dev/null 2>&1 || true; ' +
-  '  fi; ' +
-  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then ' +
-  '    echo "Failed to configure hotspot password" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  '  if ! nm_out=$(nmcli con up id "$con" 2>&1); then ' +
-  '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\'); ' +
-  '    echo "Failed to start hotspot: ${err_detail:-$nm_out}" >&2; ' +
-  '    exit 1; ' +
-  '  fi; ' +
-  'fi'
+  ethDetectFunction +
+  'IFS= read -r pwd\n' +
+  'pwd=$(printf "%s" "$pwd" | tr -d "\\r\\n")\n' +
+  'action="$1"; con="$2"; ssid="$3"; band="$4"\n' +
+  'if [[ "$action" != "save" && "$action" != "toggle" && "$action" != "stop" ]]; then exit 1; fi\n' +
+  'con=$(printf "%s" "$con" | tr -d "\\r\\n")\n' +
+  'if [[ -z "$con" || "$con" == -* ]]; then con="Hotspot"; fi\n' +
+  'ssid=$(printf "%s" "$ssid" | tr -d "\\r\\n")\n' +
+  'if [[ -z "$ssid" || ${#ssid} -gt 32 || "$ssid" =~ [^[:print:]] ]]; then ssid="Omarchy-Hotspot"; fi\n' +
+  'if [[ "$band" != "a" ]]; then band="bg"; fi\n' +
+  "ap_helper='" + createApRootHelper + "'\n" +
+  'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\')\n' +
+  'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi\n' +
+  '\n' +
+  '# No built-in default passphrase: an empty one becomes a random per-device secret.\n' +
+  'generated="false"\n' +
+  'prepare_password() {\n' +
+  '  if [[ -z "$pwd" ]]; then\n' +
+  '    # Nothing supplied: keep the passphrase already saved in the profile.\n' +
+  '    pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show id "$con" 2>/dev/null | head -n 1)\n' +
+  '  fi\n' +
+  '  if [[ -z "$pwd" ]]; then\n' +
+  '    pwd=$(LC_ALL=C tr -dc \'A-Za-z0-9\' < /dev/urandom | head -c 16)\n' +
+  '    generated="true"\n' +
+  '  fi\n' +
+  '  if [[ ${#pwd} -lt 8 || ${#pwd} -gt 63 || "$pwd" =~ [^[:print:]] ]]; then\n' +
+  '    echo "Invalid password: must be 8-63 printable ASCII characters" >&2\n' +
+  '    exit 1\n' +
+  '  fi\n' +
+  '}\n' +
+  '\n' +
+  '# Persist SSID/band/passphrase in the NetworkManager profile. The passphrase goes\n' +
+  '# through the scriptable `connection edit` editor on stdin (printf is a builtin), so\n' +
+  '# it never appears in any argv.\n' +
+  'save_profile() {\n' +
+  '  local nm_out err_detail\n' +
+  '  if ! nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
+  '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" \\\n' +
+  '      802-11-wireless.mode ap 802-11-wireless.band "$band" \\\n' +
+  '      802-11-wireless-security.key-mgmt wpa-psk \\\n' +
+  '      802-11-wireless-security.proto rsn \\\n' +
+  '      802-11-wireless-security.pairwise ccmp \\\n' +
+  '      802-11-wireless-security.group ccmp \\\n' +
+  '      802-11-wireless-security.pmf 1 \\\n' +
+  '      ipv4.method shared ipv6.method ignore ${dev:+ifname "$dev"} 2>&1); then\n' +
+  '      err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\')\n' +
+  '      echo "Failed to create hotspot connection: ${err_detail:-$nm_out}" >&2\n' +
+  '      exit 1\n' +
+  '    fi\n' +
+  '  else\n' +
+  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" \\\n' +
+  '      802-11-wireless-security.key-mgmt wpa-psk \\\n' +
+  '      802-11-wireless-security.proto rsn \\\n' +
+  '      802-11-wireless-security.pairwise ccmp \\\n' +
+  '      802-11-wireless-security.group ccmp \\\n' +
+  '      802-11-wireless-security.pmf 1 \\\n' +
+  '      ipv6.method ignore >/dev/null 2>&1 || true\n' +
+  '  fi\n' +
+  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then\n' +
+  '    echo "Failed to configure hotspot password" >&2\n' +
+  '    exit 1\n' +
+  '  fi\n' +
+  '}\n' +
+  '\n' +
+  'if [[ "$action" == "save" ]]; then\n' +
+  '  prepare_password\n' +
+  '  save_profile\n' +
+  '  exit 0\n' +
+  'fi\n' +
+  '\n' +
+  '# A running create_ap instance is only trusted if its state dir and pid file are\n' +
+  '# root-owned and the pid really is a root create_ap process.\n' +
+  'ap_pid=""; ap_dir=""\n' +
+  'find_ap() {\n' +
+  '  local d pid\n' +
+  '  ap_pid=""; ap_dir=""\n' +
+  '  for d in /tmp/create_ap.*.conf.*; do\n' +
+  '    [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]] || continue\n' +
+  '    [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]] || continue\n' +
+  '    pid=$(cat "$d/pid" 2>/dev/null)\n' +
+  '    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || continue\n' +
+  '    [[ $(stat -c \'%u\' "/proc/$pid" 2>/dev/null) -eq 0 ]] || continue\n' +
+  '    grep -q "create_ap" "/proc/$pid/cmdline" 2>/dev/null || continue\n' +
+  '    ap_pid="$pid"; ap_dir="$d"\n' +
+  '    return 0\n' +
+  '  done\n' +
+  '  return 1\n' +
+  '}\n' +
+  '\n' +
+  'is_running="false"\n' +
+  'if find_ap; then\n' +
+  '  is_running="true"\n' +
+  'elif nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con}:yes"; then\n' +
+  '  is_running="true"\n' +
+  'fi\n' +
+  '\n' +
+  'if [[ "$action" == "stop" ]] || [[ "$action" == "toggle" && "$is_running" == "true" ]]; then\n' +
+  '  if [[ -n "$ap_pid" ]]; then\n' +
+  '    pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || true\n' +
+  '  fi\n' +
+  '  nmcli con down id "$con" >/dev/null 2>&1 || true\n' +
+  '  exit 0\n' +
+  'fi\n' +
+  '\n' +
+  'prepare_password\n' +
+  '\n' +
+  'eth_dev=$(detect_eth)\n' +
+  'wifi_connected="false"\n' +
+  'if [[ -n "$dev" ]] && nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -q -F -x "${dev}:connected"; then\n' +
+  '  wifi_connected="true"\n' +
+  'fi\n' +
+  '\n' +
+  '# Wired uplink -> create_ap (iptables NAT, forwarding and DHCP/DNS are all handled\n' +
+  '# there, same as the Wi-Fi repeater). NetworkManager\'s own "shared" mode is only the\n' +
+  '# fallback when linux-wifi-hotspot is not installed and there is no Wi-Fi uplink.\n' +
+  'use_cap="false"\n' +
+  'if command -v create_ap >/dev/null 2>&1; then\n' +
+  '  if [[ -n "$eth_dev" || "$wifi_connected" == "true" ]]; then use_cap="true"; fi\n' +
+  'elif [[ -z "$eth_dev" && "$wifi_connected" == "true" ]]; then\n' +
+  '  echo "Wi-Fi is connected. Install linux-wifi-hotspot for simultaneous repeater chaining." >&2\n' +
+  '  exit 1\n' +
+  'fi\n' +
+  '\n' +
+  'if [[ "$use_cap" == "true" ]]; then\n' +
+  '  if [[ -z "$dev" ]]; then\n' +
+  '    echo "No Wi-Fi adapter found" >&2\n' +
+  '    exit 1\n' +
+  '  fi\n' +
+  '  [[ "$generated" == "true" ]] && save_profile\n' +
+  '  phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0")\n' +
+  '  if [[ ! "$phy" =~ ^phy[0-9]+$ ]]; then phy="phy0"; fi\n' +
+  '  uplink="$dev"\n' +
+  '  freq_band="default"\n' +
+  '  freq=""\n' +
+  '  if [[ -n "$eth_dev" ]]; then\n' +
+  '    # Ethernet is the uplink, so the radio is free to serve whichever band was chosen.\n' +
+  '    uplink="$eth_dev"\n' +
+  '    nmcli radio wifi on >/dev/null 2>&1 || true\n' +
+  '    if [[ "$wifi_connected" == "true" ]]; then\n' +
+  '      nmcli dev disconnect "$dev" >/dev/null 2>&1 || true\n' +
+  '    fi\n' +
+  '    if [[ "$band" == "a" ]] && ! iw phy "$phy" info 2>/dev/null | grep -A 40 "Frequencies:" | grep -E "5[0-9]{3}(\\.[0-9]+)? MHz" | grep -v -e "no IR" -e "disabled" | grep -q "MHz"; then\n' +
+  '      band="bg"\n' +
+  '    fi\n' +
+  '    if [[ "$band" == "a" ]]; then freq_band="5"; else freq_band="2.4"; fi\n' +
+  '  else\n' +
+  '    # Wi-Fi repeater: the AP has to share the channel of the active Wi-Fi link.\n' +
+  '    freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1)\n' +
+  '    if [[ -n "$freq" && "$freq" =~ ^[0-9]+$ ]]; then\n' +
+  '      ch_info=$(iw phy "$phy" info 2>/dev/null | grep -E "\\* ${freq}\\.[0-9]+ MHz")\n' +
+  '      if [[ "$ch_info" == *"no IR"* ]]; then\n' +
+  '        echo "Cannot repeat: current 5GHz Wi-Fi channel is restricted (no-IR) by card firmware. Connect to 2.4GHz Wi-Fi to repeat." >&2\n' +
+  '        exit 1\n' +
+  '      fi\n' +
+  '    fi\n' +
+  '  fi\n' +
+  '\n' +
+  '  # Pick a hotspot subnet that does not collide with any existing route.\n' +
+  '  gw="192.168.12.1"\n' +
+  '  for n in 12 13 14 15 16; do\n' +
+  '    if ! ip -4 route show 2>/dev/null | grep -q "192\\.168\\.${n}\\."; then\n' +
+  '      gw="192.168.${n}.1"\n' +
+  '      break\n' +
+  '    fi\n' +
+  '  done\n' +
+  '  up_dns=$(resolvectl dns "$uplink" 2>/dev/null | awk \'{$1=""; print $0}\' | tr \' \' \'\\n\' | grep -E \'^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\' | grep -v \'^127\\.\' | paste -sd, -)\n' +
+  '  if [[ -n "$up_dns" ]]; then dns_servers="$up_dns"; else dns_servers="1.1.1.1,8.8.8.8"; fi\n' +
+  '\n' +
+  '  cap_sec_dir=$(mktemp -d /tmp/create_ap_sec.XXXXXX) || exit 1\n' +
+  '  chmod 700 "$cap_sec_dir"\n' +
+  '  cap_conf="$cap_sec_dir/ap.conf"\n' +
+  '  cap_log="$cap_sec_dir/ap.log"\n' +
+  '  : > "$cap_conf"\n' +
+  '  : > "$cap_log"\n' +
+  '  chmod 600 "$cap_conf" "$cap_log"\n' +
+  '  trap \'rm -rf "$cap_sec_dir"\' EXIT HUP INT QUIT TERM\n' +
+  '  # create_ap reads this file with a plain `read` (no -r): double backslashes so\n' +
+  '  # SSIDs and passphrases containing one survive intact.\n' +
+  '  cap_ssid=${ssid//\\\\/\\\\\\\\}\n' +
+  '  cap_pwd=${pwd//\\\\/\\\\\\\\}\n' +
+  '  {\n' +
+  '    printf "WIFI_IFACE=%s\\n" "$dev"\n' +
+  '    printf "INTERNET_IFACE=%s\\n" "$uplink"\n' +
+  '    printf "SSID=%s\\n" "$cap_ssid"\n' +
+  '    printf "PASSPHRASE=%s\\n" "$cap_pwd"\n' +
+  '    printf "GATEWAY=%s\\n" "$gw"\n' +
+  '    printf "CHANNEL=default\\n"\n' +
+  '    printf "FREQ_BAND=%s\\n" "$freq_band"\n' +
+  '    printf "DHCP_DNS=%s\\n" "$dns_servers"\n' +
+  '    printf "IEEE80211N=1\\n"\n' +
+  '    printf "HT_CAPAB=[SHORT-GI-20]\\n"\n' +
+  '    printf "DAEMONIZE=1\\n"\n' +
+  '  } > "$cap_conf"\n' +
+  '  # Only the path of the private config file crosses the pkexec argv boundary.\n' +
+  '  pkexec bash -c "$ap_helper" create-ap-root start --config "$cap_conf" > "$cap_log" 2>&1\n' +
+  '  pk_status=$?\n' +
+  '  if [[ $pk_status -ne 0 ]] && grep -qi "not authorized" "$cap_log" 2>/dev/null; then\n' +
+  '    echo "Hotspot start cancelled: polkit authorization denied or dismissed." >&2\n' +
+  '    exit 1\n' +
+  '  fi\n' +
+  '  for i in {1..14}; do\n' +
+  '    sleep 0.5\n' +
+  '    if find_ap; then\n' +
+  '      viface=$(cat "$ap_dir/wifi_iface" 2>/dev/null)\n' +
+  '      if [[ -n "$viface" && "$viface" =~ ^[a-zA-Z0-9_.-]+$ && -d "/sys/class/net/$viface" ]]; then\n' +
+  '        exit 0\n' +
+  '      fi\n' +
+  '    fi\n' +
+  '  done\n' +
+  '  if grep -qi "rf-kill" "$cap_log" 2>/dev/null; then\n' +
+  '    echo "Cannot start repeater: Wi-Fi is soft-blocked by rfkill. Run \'rfkill unblock wifi\'." >&2\n' +
+  '  elif grep -qi "does not fully support virtual interfaces" "$cap_log" 2>/dev/null; then\n' +
+  '    echo "Hotspot error: Wi-Fi card cannot run an access point on this band/channel at the same time." >&2\n' +
+  '  elif grep -qi "not authorized" "$cap_log" 2>/dev/null; then\n' +
+  '    echo "Hotspot start cancelled: polkit authorization denied or dismissed." >&2\n' +
+  '  else\n' +
+  '    err_line=$(grep -m 1 -E "^(ERROR|RTNETLINK):" "$cap_log" 2>/dev/null | sed -e \'s/^ERROR:[[:space:]]*//\')\n' +
+  '    if [[ -n "$err_line" ]]; then\n' +
+  '      echo "Hotspot error: $err_line" >&2\n' +
+  '    elif [[ -n "$freq" ]]; then\n' +
+  '      cur_band="2.4GHz"; if [[ "$freq" -gt 5000 ]]; then cur_band="5GHz"; fi\n' +
+  '      echo "Repeater failed: Wi-Fi card cannot broadcast AP while connected to $cur_band (${freq} MHz)." >&2\n' +
+  '    else\n' +
+  '      echo "Failed to start hotspot: verify your Wi-Fi interface and Ethernet connection." >&2\n' +
+  '    fi\n' +
+  '  fi\n' +
+  '  exit 1\n' +
+  'else\n' +
+  '  # Fallback: plain NetworkManager hotspot (no linux-wifi-hotspot installed).\n' +
+  '  nmcli radio wifi on >/dev/null 2>&1 || true\n' +
+  '  if [[ "$wifi_connected" == "true" ]]; then\n' +
+  '    nmcli dev disconnect "$dev" >/dev/null 2>&1 || true\n' +
+  '  fi\n' +
+  '  if [[ "$band" == "a" && -n "$dev" ]]; then\n' +
+  '    phy=$(cat /sys/class/net/"$dev"/phy80211/name 2>/dev/null || echo "phy0")\n' +
+  '    if [[ "$phy" =~ ^phy[0-9]+$ ]] && ! iw phy "$phy" info 2>/dev/null | grep -A 40 "Frequencies:" | grep -E "5[0-9]{3}(\\.[0-9]+)? MHz" | grep -v -e "no IR" -e "disabled" | grep -q "MHz"; then\n' +
+  '      band="bg"\n' +
+  '    fi\n' +
+  '  fi\n' +
+  '  save_profile\n' +
+  '  if ! nm_out=$(nmcli con up id "$con" 2>&1); then\n' +
+  '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\')\n' +
+  '    echo "Failed to start hotspot: ${err_detail:-$nm_out}" >&2\n' +
+  '    exit 1\n' +
+  '  fi\n' +
+  'fi\n'
 
 // The password arrives on stdin; argv is world-readable in /proc,
 // so secrets must never appear in command line arguments.
@@ -979,6 +1180,9 @@ if (typeof module !== "undefined") {
     wifiSectionTitle: wifiSectionTitle,
     requiresCredentials: requiresCredentials,
     canForgetNetwork: canForgetNetwork,
+    isValidServerDomain: isValidServerDomain,
+    ethDetectFunction: ethDetectFunction,
+    createApRootHelper: createApRootHelper,
     enterpriseConnectScript: enterpriseConnectScript,
     networkFailureReason: networkFailureReason,
     shouldRepromptPassphrase: shouldRepromptPassphrase,

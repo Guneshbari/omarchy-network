@@ -104,7 +104,7 @@ Panel {
 
   // Wired connection state
   property string wiredConnectionName: "Wired connection 1"
-  property string wiredDeviceName: "enp109s0"
+  property string wiredDeviceName: ""
   property string wiredMethod: "auto"
   property string wiredSelectedMethod: "auto"
   property string wiredAddresses: ""
@@ -370,9 +370,6 @@ Panel {
     } else if (wiredRow === 1) {
       if (wiredIndex === 0) {
         wiredSelectedMethod = "auto"
-        if (wiredMethod !== "auto") {
-          applyWired("auto")
-        }
       } else if (wiredIndex === 1) {
         wiredSelectedMethod = "manual"
       }
@@ -506,6 +503,12 @@ Panel {
       setScannerEnabled(false)
       hotspotEditing = false
       hotspotDraftPassword = ""
+      // The QR overlay outlives the panel and still needs it; dismissHotspotQr
+      // clears it in that case.
+      if (!hotspotQrOpen) {
+        hotspotPassword = ""
+        hotspotPasswordVisible = false
+      }
       passwordSsid = ""
       passwordText = ""
       identityText = ""
@@ -610,7 +613,8 @@ Panel {
     (info && info.type === "wifi")
   )
   readonly property bool isWiredConnected: !!(
-    wiredDevice && wiredDevice.connected
+    (wiredDevice && wiredDevice.connected) ||
+    (info && info.type === "ethernet")
   )
 
   readonly property string kind: {
@@ -803,7 +807,8 @@ Panel {
         name.startsWith("zt")) {
       return false
     }
-    if (device.nmManaged === false) return false
+    // Not filtered on nmManaged: a NIC configured outside NetworkManager is
+    // still a live wired link and must be detected as one.
     return name.startsWith("en") || name.startsWith("eth")
   }
 
@@ -1118,7 +1123,7 @@ Panel {
       ? "Stopping hotspot..."
       : (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotHasCreateAp ? "Starting Wi-Fi repeater..." : "Starting hotspot...")
     root.hotspotStatusIsError = false
-    hotspotApplyProc.secret = root.hotspotPassword || "omarchy12345"
+    hotspotApplyProc.secret = root.hotspotPassword || ""
     var effectiveBand = (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
       ? root.hotspotConnectedBand
       : (root.hotspotBand || "bg")
@@ -1176,7 +1181,7 @@ Panel {
     var effectiveBand = (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
       ? root.hotspotConnectedBand
       : root.hotspotDraftBand
-    hotspotApplyProc.secret = root.hotspotDraftPassword || root.hotspotPassword || "omarchy12345"
+    hotspotApplyProc.secret = root.hotspotDraftPassword || root.hotspotPassword || ""
     hotspotApplyProc.command = [
       "bash", "-c", Model.hotspotApplyScript, "hotspot-apply",
       "save",
@@ -1245,6 +1250,10 @@ Panel {
     root.hotspotQrSize = 0
     if (hotspotQrProc.running) {
       hotspotQrProc.running = false
+    }
+    if (!root.opened) {
+      root.hotspotPassword = ""
+      root.hotspotPasswordVisible = false
     }
   }
 
@@ -1378,6 +1387,9 @@ Panel {
     if (/[\r\n]/.test(ca)) return
     var dom = domain || ""
     if (/[\r\n]/.test(dom)) return
+    // The expected RADIUS server name must always be pinned (a CA chain alone
+    // accepts any host with a valid certificate for an unrelated domain).
+    if (!Model.isValidServerDomain(dom)) return
     runNetworkAction("connect", networkForSsid(ssid), function(network) {
       enterpriseConnect.secret = passphrase
       enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity, ca, dom]
@@ -3073,9 +3085,6 @@ Panel {
             }
             onClicked: {
               root.wiredSelectedMethod = "auto"
-              if (root.wiredMethod !== "auto") {
-                root.applyWired("auto")
-              }
             }
           }
 
@@ -3582,8 +3591,8 @@ Panel {
         root.passwordText = ""
         return
       }
-      if (root.identityText.length > 0 && root.domainText.length > 0) {
-        root.connectEnterprise(net.ssid, root.identityText, root.passwordText, "", root.domainText)
+      if (root.identityText.length > 0 && Model.isValidServerDomain(root.domainText.trim())) {
+        root.connectEnterprise(net.ssid, root.identityText, root.passwordText, "", root.domainText.trim())
       }
     }
 
@@ -3835,7 +3844,7 @@ Panel {
         anchors.top: idField.bottom
         anchors.topMargin: Style.space(4)
         anchors.rightMargin: Style.space(6)
-        placeholderText: "Domain (e.g. radius.example.com)"
+        placeholderText: "Server domain, required (e.g. radius.example.com)"
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         foreground: root.bar.foreground
@@ -3872,7 +3881,7 @@ Panel {
         text: row.isPasswordOpen ? root.passwordText : ""
 
         onAccepted: {
-          if (row.isEnterprise && root.domainText.length === 0) {
+          if (row.isEnterprise && !Model.isValidServerDomain(root.domainText.trim())) {
             domainField.forceActiveFocus()
           } else {
             row.submitCredentials()
@@ -3928,7 +3937,7 @@ Panel {
         visible: !row.isBusy && !row.isFailed
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        enabled: row.net && pwField.text.length > 0 && (!row.isEnterprise || (idField.text.length > 0 && domainField.text.length > 0))
+        enabled: row.net && pwField.text.length > 0 && (!row.isEnterprise || (idField.text.length > 0 && Model.isValidServerDomain(domainField.text.trim())))
         iconText: "󰄬"
         tooltipText: "Connect"
         foreground: root.bar.foreground
