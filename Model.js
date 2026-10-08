@@ -709,18 +709,26 @@ var hotspotQueryScript =
   '  if [[ "$wifi_connected" == "true" && -n "$connected_band" ]]; then band="$connected_band"; else band="${nm_band:-bg}"; fi; ' +
   '  ap_iface=""; ' +
   'fi; ' +
+  'lease_files=""\n' +
+  'for d in /tmp/create_ap.*.conf.*; do\n' +
+  '  [[ -d "$d" && ! -L "$d" && "$(stat -c %u "$d" 2>/dev/null)" == 0 ]] || continue\n' +
+  '  f="$d/dnsmasq.leases"\n' +
+  '  [[ -f "$f" && ! -L "$f" && "$(stat -c %u "$f" 2>/dev/null)" == 0 ]] || continue\n' +
+  '  [[ "$f" =~ ^/tmp/create_ap\\.[A-Za-z0-9_.-]+\\.conf\\.[A-Za-z0-9]+/dnsmasq\\.leases$ ]] || continue\n' +
+  '  lease_files="$lease_files $f"\n' +
+  'done\n' +
   'client_json="[]"; ' +
   'if [[ "$active" == "true" ]]; then ' +
-  '  client_json=$(awk -v iface="${ap_iface:-}" \'' +
+  '  client_json=$(awk -v iface="${ap_iface:-}" -v leasefiles="$lease_files" \'' +
   'BEGIN {' +
-  '  cmd = "cat /tmp/create_ap.*.conf.*/dnsmasq.leases /var/lib/NetworkManager/dnsmasq-*.leases 2>/dev/null";' +
+  '  cmd = "cat " leasefiles " /var/lib/NetworkManager/dnsmasq-*.leases 2>/dev/null";' +
   '  while ((cmd | getline line) > 0) {' +
   '    n = split(line, f);' +
   '    if (n >= 3 && f[2] ~ /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/) {' +
   '      m = toupper(f[2]);' +
   '      seen[m] = 1;' +
   '      if (f[3] ~ /^[0-9.]+$/) client_ip[m] = f[3];' +
-  '      if (n >= 4 && f[4] != "*" && f[4] != "") client_host[m] = f[4];' +
+  '      if (n >= 4 && length(f[4]) <= 63 && f[4] ~ /^[A-Za-z0-9._-]+$/) client_host[m] = f[4];' +
   '    }' +
   '  }' +
   '  close(cmd);' +
@@ -949,17 +957,41 @@ var hotspotApplyScript =
   '  uplink="$dev"\n' +
   '  freq_band="default"\n' +
   '  freq=""\n' +
+  '  hostapd_n="1"\n' +
+  '  ht_capab="[SHORT-GI-20]"\n' +
+  '  dhcp_dns=""\n' +
   '  if [[ -n "$eth_dev" ]]; then\n' +
-  '    # Ethernet is the uplink, so the radio is free to serve whichever band was chosen.\n' +
+  '    # Wired uplink: configured like the linux-wifi-hotspot GUI does it\n' +
+  '    # (`create_ap <wifi> <inet> ssid pass --mkconfig`), but with 802.11n explicitly\n' +
+  '    # enabled (hostapd_n="1") to avoid capping link speeds to legacy 54 Mbps.\n' +
   '    uplink="$eth_dev"\n' +
-  '    nmcli radio wifi on >/dev/null 2>&1 || true\n' +
-  '    if [[ "$wifi_connected" == "true" ]]; then\n' +
-  '      nmcli dev disconnect "$dev" >/dev/null 2>&1 || true\n' +
+  '    hostapd_n="1"\n' +
+  '    ht_capab="[HT40+]"\n' +
+  '    dhcp_dns="gateway"\n' +
+  '    if nmcli radio wifi 2>/dev/null | grep -qi disabled; then\n' +
+  '      nmcli radio wifi on >/dev/null 2>&1 || true\n' +
+  '      sleep 1\n' +
   '    fi\n' +
   '    if [[ "$band" == "a" ]] && ! iw phy "$phy" info 2>/dev/null | grep -A 40 "Frequencies:" | grep -E "5[0-9]{3}(\\.[0-9]+)? MHz" | grep -v -e "no IR" -e "disabled" | grep -q "MHz"; then\n' +
   '      band="bg"\n' +
   '    fi\n' +
-  '    if [[ "$band" == "a" ]]; then freq_band="5"; else freq_band="2.4"; fi\n' +
+  '    want_band="2.4"\n' +
+  '    if [[ "$band" == "a" ]]; then want_band="5"; fi\n' +
+  '    if [[ "$wifi_connected" == "true" ]]; then\n' +
+  '      # The AP shares the radio with the station link. Keep that link when it is on\n' +
+  '      # the requested band (create_ap follows its channel); otherwise drop it, since\n' +
+  '      # many adapters cannot run the AP on a second channel.\n' +
+  '      sta_freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1)\n' +
+  '      sta_band="2.4"\n' +
+  '      if [[ "$sta_freq" =~ ^[0-9]+$ && "$sta_freq" -ge 5000 ]]; then sta_band="5"; fi\n' +
+  '      if [[ "$sta_band" != "$want_band" ]]; then\n' +
+  '        nmcli dev disconnect "$dev" >/dev/null 2>&1 || true\n' +
+  '        sleep 1\n' +
+  '      fi\n' +
+  '      freq_band="$want_band"\n' +
+  '    elif [[ "$want_band" == "5" ]]; then\n' +
+  '      freq_band="5"\n' +
+  '    fi\n' +
   '  else\n' +
   '    # Wi-Fi repeater: the AP has to share the channel of the active Wi-Fi link.\n' +
   '    freq=$(iw dev "$dev" link 2>/dev/null | grep -i "freq:" | awk \'{print $2}\' | cut -d. -f1)\n' +
@@ -970,6 +1002,8 @@ var hotspotApplyScript =
   '        exit 1\n' +
   '      fi\n' +
   '    fi\n' +
+  '    up_dns=$(resolvectl dns "$uplink" 2>/dev/null | awk \'{$1=""; print $0}\' | tr \' \' \'\\n\' | grep -E \'^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\' | grep -v \'^127\\.\' | paste -sd, -)\n' +
+  '    if [[ -n "$up_dns" ]]; then dhcp_dns="$up_dns"; else dhcp_dns="1.1.1.1,8.8.8.8"; fi\n' +
   '  fi\n' +
   '\n' +
   '  # Pick a hotspot subnet that does not collide with any existing route.\n' +
@@ -980,8 +1014,6 @@ var hotspotApplyScript =
   '      break\n' +
   '    fi\n' +
   '  done\n' +
-  '  up_dns=$(resolvectl dns "$uplink" 2>/dev/null | awk \'{$1=""; print $0}\' | tr \' \' \'\\n\' | grep -E \'^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\' | grep -v \'^127\\.\' | paste -sd, -)\n' +
-  '  if [[ -n "$up_dns" ]]; then dns_servers="$up_dns"; else dns_servers="1.1.1.1,8.8.8.8"; fi\n' +
   '\n' +
   '  cap_sec_dir=$(mktemp -d /tmp/create_ap_sec.XXXXXX) || exit 1\n' +
   '  chmod 700 "$cap_sec_dir"\n' +
@@ -991,22 +1023,54 @@ var hotspotApplyScript =
   '  : > "$cap_log"\n' +
   '  chmod 600 "$cap_conf" "$cap_log"\n' +
   '  trap \'rm -rf "$cap_sec_dir"\' EXIT HUP INT QUIT TERM\n' +
+  '  # Keep create_ap\'s startup output where the user can read it after a failure\n' +
+  '  # (written by the user, never by the root helper).\n' +
+  '  save_log() {\n' +
+  '    local sd="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-network"\n' +
+  '    mkdir -p -m 700 "$sd" 2>/dev/null && cp -f "$cap_log" "$sd/hotspot-last.log" 2>/dev/null && chmod 600 "$sd/hotspot-last.log" 2>/dev/null\n' +
+  '    return 0\n' +
+  '  }\n' +
   '  # create_ap reads this file with a plain `read` (no -r): double backslashes so\n' +
   '  # SSIDs and passphrases containing one survive intact.\n' +
   '  cap_ssid=${ssid//\\\\/\\\\\\\\}\n' +
   '  cap_pwd=${pwd//\\\\/\\\\\\\\}\n' +
+  '  # Same keys, same order as `create_ap --mkconfig` writes (verified against upstream).\n' +
   '  {\n' +
+  '    printf "CHANNEL=default\\n"\n' +
+  '    printf "GATEWAY=%s\\n" "$gw"\n' +
+  '    printf "WPA_VERSION=2\\n"\n' +
+  '    printf "ETC_HOSTS=0\\n"\n' +
+  '    printf "DHCP_DNS=%s\\n" "$dhcp_dns"\n' +
+  '    printf "NO_DNS=0\\n"\n' +
+  '    printf "NO_DNSMASQ=0\\n"\n' +
+  '    printf "HIDDEN=0\\n"\n' +
+  '    printf "MAC_FILTER=0\\n"\n' +
+  '    printf "MAC_FILTER_ACCEPT=/etc/hostapd/hostapd.accept\\n"\n' +
+  '    printf "ISOLATE_CLIENTS=0\\n"\n' +
+  '    printf "SHARE_METHOD=nat\\n"\n' +
+  '    printf "IEEE80211N=%s\\n" "$hostapd_n"\n' +
+  '    printf "IEEE80211AC=0\\n"\n' +
+  '    printf "IEEE80211AX=0\\n"\n' +
+  '    printf "HT_CAPAB=%s\\n" "$ht_capab"\n' +
+  '    printf "VHT_CAPAB=\\n"\n' +
+  '    printf "VHT_CHWIDTH=80\\n"\n' +
+  '    printf "DRIVER=nl80211\\n"\n' +
+  '    printf "NO_VIRT=0\\n"\n' +
+  '    printf "COUNTRY=\\n"\n' +
+  '    printf "FREQ_BAND=%s\\n" "$freq_band"\n' +
+  '    printf "NEW_MACADDR=\\n"\n' +
+  '    printf "DAEMONIZE=1\\n"\n' +
+  '    printf "DAEMON_PIDFILE=\\n"\n' +
+  '    printf "DAEMON_LOGFILE=/dev/null\\n"\n' +
+  '    printf "DNS_LOGFILE=\\n"\n' +
+  '    printf "NO_HAVEGED=0\\n"\n' +
   '    printf "WIFI_IFACE=%s\\n" "$dev"\n' +
   '    printf "INTERNET_IFACE=%s\\n" "$uplink"\n' +
   '    printf "SSID=%s\\n" "$cap_ssid"\n' +
   '    printf "PASSPHRASE=%s\\n" "$cap_pwd"\n' +
-  '    printf "GATEWAY=%s\\n" "$gw"\n' +
-  '    printf "CHANNEL=default\\n"\n' +
-  '    printf "FREQ_BAND=%s\\n" "$freq_band"\n' +
-  '    printf "DHCP_DNS=%s\\n" "$dns_servers"\n' +
-  '    printf "IEEE80211N=1\\n"\n' +
-  '    printf "HT_CAPAB=[SHORT-GI-20]\\n"\n' +
-  '    printf "DAEMONIZE=1\\n"\n' +
+  '    printf "USE_PSK=0\\n"\n' +
+  '    printf "ADDN_HOSTS=\\n"\n' +
+  '    printf "DHCP_HOSTS=\\n"\n' +
   '  } > "$cap_conf"\n' +
   '  # Only the path of the private config file crosses the pkexec argv boundary.\n' +
   '  pkexec bash -c "$ap_helper" create-ap-root start --config "$cap_conf" > "$cap_log" 2>&1\n' +
@@ -1020,10 +1084,30 @@ var hotspotApplyScript =
   '    if find_ap; then\n' +
   '      viface=$(cat "$ap_dir/wifi_iface" 2>/dev/null)\n' +
   '      if [[ -n "$viface" && "$viface" =~ ^[a-zA-Z0-9_.-]+$ && -d "/sys/class/net/$viface" ]]; then\n' +
-  '        exit 0\n' +
+  '        # An AP that is "on" but cannot hand out addresses is worse than a clear error:\n' +
+  '        # the AP interface must still hold the gateway address and dnsmasq must be\n' +
+  '        # listening on UDP 67.\n' +
+  '        have_ip="false"; have_dhcp="false"\n' +
+  '        for k in 1 2 3 4 5 6; do\n' +
+  '          if ip -4 -o addr show dev "$viface" 2>/dev/null | grep -q "inet ${gw}/"; then have_ip="true"; else have_ip="false"; fi\n' +
+  '          if ! command -v ss >/dev/null 2>&1; then have_dhcp="true"\n' +
+  '          elif ss -H -uln 2>/dev/null | awk \'{print $4}\' | grep -q -E \':67$\'; then have_dhcp="true"\n' +
+  '          else have_dhcp="false"; fi\n' +
+  '          if [[ "$have_ip" == "true" && "$have_dhcp" == "true" ]]; then exit 0; fi\n' +
+  '          sleep 0.5\n' +
+  '        done\n' +
+  '        pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || true\n' +
+  '        save_log\n' +
+  '        if [[ "$have_ip" != "true" ]]; then\n' +
+  '          echo "Hotspot stopped: $viface lost its address ${gw}. Another network service (NetworkManager, iwd or systemd-networkd) is reconfiguring the access-point interface." >&2\n' +
+  '        else\n' +
+  '          echo "Hotspot stopped: no DHCP server is listening on UDP 67. Check for another DHCP/dnsmasq service and for a firewall blocking UDP 67 on $viface." >&2\n' +
+  '        fi\n' +
+  '        exit 1\n' +
   '      fi\n' +
   '    fi\n' +
   '  done\n' +
+  '  save_log\n' +
   '  if grep -qi "rf-kill" "$cap_log" 2>/dev/null; then\n' +
   '    echo "Cannot start repeater: Wi-Fi is soft-blocked by rfkill. Run \'rfkill unblock wifi\'." >&2\n' +
   '  elif grep -qi "does not fully support virtual interfaces" "$cap_log" 2>/dev/null; then\n' +

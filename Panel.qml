@@ -2426,6 +2426,7 @@ Panel {
 
         // Status message if busy or error
         Text {
+          textFormat: Text.PlainText
           text: root.hotspotStatusMsg
           color: root.hotspotStatusIsError ? Color.urgent : Color.accent
           font.family: root.bar.fontFamily
@@ -2459,6 +2460,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: root.hotspotSsid
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
@@ -2701,6 +2703,7 @@ Panel {
                     spacing: 1
 
                     Text {
+                      textFormat: Text.PlainText
                       text: modelData.name || modelData.ip || modelData.mac
                       color: root.bar.foreground
                       font.family: root.bar.fontFamily
@@ -2711,6 +2714,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: (modelData.ip ? (modelData.ip + "  ·  ") : "") + modelData.mac
                       color: Qt.darker(root.bar.foreground, 1.5)
                       font.family: root.bar.fontFamily
@@ -3038,6 +3042,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: (root.wiredConnectionName ? root.wiredConnectionName : "Wired connection 1") +
                 (root.wiredDeviceName ? "  •  " + root.wiredDeviceName : "")
           color: Qt.darker(root.bar.foreground, 1.4)
@@ -3322,6 +3327,7 @@ Panel {
             Text {
               id: wiredStatusLabel
               visible: text !== ""
+              textFormat: Text.PlainText
               text: root.wiredStatusMsg
               color: root.wiredStatusIsError ? root.bar.urgent : root.bar.foreground
               font.family: root.bar.fontFamily
