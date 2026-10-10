@@ -489,19 +489,33 @@ var createApRootHelper =
   '  done\n' +
   '}\n' +
   '\n' +
+  '# Only a root-owned create_ap that nobody else can write to is ever executed.\n' +
+  'create_ap_bin=""\n' +
+  'for c in /usr/local/bin/create_ap /usr/bin/create_ap; do\n' +
+  '  if [[ -f "$c" && -x "$c" && ! -L "$c" && "$(stat -c %u -- "$c" 2>/dev/null)" == 0 ]] \\\n' +
+  '    && (( ( 8#$(stat -c %a -- "$c" 2>/dev/null || echo 777) & 8#022 ) == 0 )); then\n' +
+  '    create_ap_bin="$c"\n' +
+  '    break\n' +
+  '  fi\n' +
+  'done\n' +
+  'if [[ -z "$create_ap_bin" ]]; then\n' +
+  '  echo "create_ap is not installed (or is writable by non-root users)" >&2\n' +
+  '  exit 1\n' +
+  'fi\n' +
+  '\n' +
   'case "${1:-}" in\n' +
   '  start)\n' +
   '    shift\n' +
   '    harden_common || exit 1\n' +
   '    reap_stale_dnsmasq\n' +
-  '    exec create_ap "$@"\n' +
+  '    exec "$create_ap_bin" "$@"\n' +
   '    ;;\n' +
   '  stop)\n' +
   '    harden_common || exit 1\n' +
   '    for d in /tmp/create_ap.*.conf.*; do\n' +
   '      [[ -d "$d" ]] && owned_by_root "$d" && owned_by_root "$d/pid" || continue\n' +
   '      pid=$(cat "$d/pid" 2>/dev/null)\n' +
-  '      is_create_ap_pid "$pid" && create_ap --stop "$pid" >/dev/null 2>&1\n' +
+  '      is_create_ap_pid "$pid" && "$create_ap_bin" --stop "$pid" >/dev/null 2>&1\n' +
   '    done\n' +
   '    reap_stale_dnsmasq\n' +
   '    exit 0\n' +
@@ -646,7 +660,12 @@ var hotspotQueryScript =
   'has_ap="false"; ' +
   'if [[ -n "$dev" ]] && iw list 2>/dev/null | grep -A 8 "Supported interface modes" | grep -q "AP"; then has_ap="true"; fi; ' +
   'has_create_ap="false"; ' +
-  'if command -v create_ap >/dev/null 2>&1; then has_create_ap="true"; fi; ' +
+  'if [[ -x /usr/local/bin/create_ap || -x /usr/bin/create_ap ]]; then has_create_ap="true"; fi; ' +
+  'insecure_pkg="false"; ' +
+  'for pf in /usr/share/polkit-1/actions/*.policy; do ' +
+  '  [[ -f "$pf" ]] || continue; ' +
+  '  if grep -q -E "org\\.opensuse\\.policykit\\.(wihotspot-gui|create-ap)" "$pf" 2>/dev/null && grep -q "<allow_active>yes" "$pf" 2>/dev/null; then insecure_pkg="true"; fi; ' +
+  'done; ' +
   'eth_dev=$(detect_eth); ' +
   'eth_connected="false"; ' +
   'if [[ -n "$eth_dev" ]]; then eth_connected="true"; fi; ' +
@@ -815,8 +834,8 @@ var hotspotQueryScript =
   '  if [[ -z "$client_json" || "$client_json" != "["*"]" ]]; then client_json="[]"; fi; ' +
   'fi; ' +
   'clients=$(echo "$client_json" | jq "length" 2>/dev/null || echo 0); ' +
-  'printf "%s" "${pwd:-}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
-  '  \'{"name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "clientList": $clientList, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "wifiConnected": $wifiConnected, "connectedBand": $connectedBand, "ethernetConnected": $ethernetConnected, "repeaterCapable": $repeaterCapable}\''
+  'printf "%s" "${pwd:-}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson insecureWihotspot "$insecure_pkg" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
+  '  \'{"name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "clientList": $clientList, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "insecureWihotspot": $insecureWihotspot, "wifiConnected": $wifiConnected, "connectedBand": $connectedBand, "ethernetConnected": $ethernetConnected, "repeaterCapable": $repeaterCapable}\''
 
 // The password arrives on stdin and reaches nmcli through the scriptable
 // `connection edit` editor or create_ap through a protected temporary config file.
@@ -939,7 +958,7 @@ var hotspotApplyScript =
   '# there, same as the Wi-Fi repeater). NetworkManager\'s own "shared" mode is only the\n' +
   '# fallback when linux-wifi-hotspot is not installed and there is no Wi-Fi uplink.\n' +
   'use_cap="false"\n' +
-  'if command -v create_ap >/dev/null 2>&1; then\n' +
+  'if [[ -x /usr/local/bin/create_ap || -x /usr/bin/create_ap ]]; then\n' +
   '  if [[ -n "$eth_dev" || "$wifi_connected" == "true" ]]; then use_cap="true"; fi\n' +
   'elif [[ -z "$eth_dev" && "$wifi_connected" == "true" ]]; then\n' +
   '  echo "Wi-Fi is connected. Install linux-wifi-hotspot for simultaneous repeater chaining." >&2\n' +
@@ -1194,35 +1213,64 @@ var hotspotQrScript =
   '  printf "%s\\n" "$row"; ' +
   'done <<<"$ascii"'
 
-// Pinned AUR package installer for linux-wifi-hotspot.
-// Binds to an immutable commit SHA and verifies the PKGBUILD checksum to prevent
-// arbitrary code execution from mutable upstream/AUR HEAD changes.
+// create_ap-only installer. Pinned to an immutable upstream commit and a verified
+// SHA-256. It intentionally avoids the linux-wifi-hotspot package: that package also
+// ships wihotspot-gui and a Polkit policy granting any active local user a
+// passwordless root create_ap / GUI (whose SSID/password reach a shell). Offers to
+// remove that package if it is already installed.
 var installRepeaterScript =
-  'set -euo pipefail; ' +
-  'if pacman -Q linux-wifi-hotspot >/dev/null 2>&1; then ' +
-  '  echo "linux-wifi-hotspot is already installed."; ' +
-  '  exit 0; ' +
-  'fi; ' +
-  'AUR_COMMIT="09f15942b495d89ef0f34abf2885f32d84f28025"; ' +
-  'EXPECTED_SHA="f2b08a066f7a35c08030d175be6a9959b3de2b50993026ac359fd3900cacfbef"; ' +
-  'EXPECTED_INSTALL_SHA="f417033bfc4253fe575b13fa7a4d7ffa97758d03bf95c7627043472a1f3a6b29"; ' +
-  'BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/aur-lwh.XXXXXX"); ' +
-  'chmod 700 "$BUILD_DIR"; ' +
-  'trap \'rm -rf "$BUILD_DIR"\' EXIT HUP INT QUIT TERM; ' +
-  'echo "==> Fetching linux-wifi-hotspot at pinned release ($AUR_COMMIT)..."; ' +
-  'git clone -q https://aur.archlinux.org/linux-wifi-hotspot.git "$BUILD_DIR" || { echo "Failed to clone AUR repository" >&2; exit 1; }; ' +
-  'cd "$BUILD_DIR"; ' +
-  'echo "==> Checking out immutable commit..."; ' +
-  'git checkout -q "$AUR_COMMIT" || { echo "Failed to checkout commit $AUR_COMMIT" >&2; exit 1; }; ' +
-  'if [ "$(git rev-parse HEAD)" != "$AUR_COMMIT" ]; then ' +
-  '  echo "Error: Commit SHA mismatch (expected $AUR_COMMIT)" >&2; exit 1; ' +
-  'fi; ' +
-  'echo "==> Verifying PKGBUILD and install script checksums..."; ' +
-  'if ! printf "%s  PKGBUILD\\n%s  linux-wifi-hotspot.install\\n" "$EXPECTED_SHA" "$EXPECTED_INSTALL_SHA" | sha256sum -c --status -; then ' +
-  '  echo "Error: Integrity checksum verification failed!" >&2; exit 1; ' +
-  'fi; ' +
-  'echo "==> Building and installing verified package..."; ' +
-  'makepkg -si --needed --noconfirm'
+  'set -euo pipefail\n' +
+  '# Installs ONLY the create_ap script, pinned to an immutable upstream commit and a\n' +
+  '# verified SHA-256. The linux-wifi-hotspot package is deliberately NOT used: it also\n' +
+  '# installs wihotspot-gui and a Polkit policy that lets any active local user run\n' +
+  '# create_ap / the GUI as root without a password.\n' +
+  'UPSTREAM_COMMIT="63c2168626a0b13015913d52d5dbd5e1d91a7fb6"\n' +
+  'EXPECTED_SHA="6ff2bde71be2076781c2d7338bcef53d7a787b2c557230feba76113072911667"\n' +
+  'URL="https://raw.githubusercontent.com/lakinduakash/linux-wifi-hotspot/${UPSTREAM_COMMIT}/src/scripts/create_ap"\n' +
+  'DEST="/usr/local/bin/create_ap"\n' +
+  '\n' +
+  'pkgs=$(pacman -Qq 2>/dev/null | grep -E \'^linux-wifi-hotspot(-git|-bin)?$\' || true)\n' +
+  'if [[ -n "$pkgs" ]]; then\n' +
+  '  echo\n' +
+  '  echo "WARNING: the linux-wifi-hotspot package is installed ($(echo $pkgs))."\n' +
+  '  echo "Its Polkit policy lets any active local user run /usr/bin/create_ap and"\n' +
+  '  echo "/usr/bin/wihotspot-gui as root WITHOUT a password, and the GUI passes the"\n' +
+  '  echo "SSID/password to a shell. This plugin does not need the package."\n' +
+  '  read -r -p "Remove it now? [y/N] " ans || ans="n"\n' +
+  '  if [[ "$ans" =~ ^[Yy]$ ]]; then\n' +
+  '    sudo pacman -Rns --noconfirm $pkgs\n' +
+  '  else\n' +
+  '    echo "Left installed. Remove it later with: sudo pacman -Rns $pkgs"\n' +
+  '  fi\n' +
+  'fi\n' +
+  '\n' +
+  'if [[ -f "$DEST" && ! -L "$DEST" && "$(stat -c %u "$DEST")" == "0" ]] && [[ "$(sha256sum "$DEST" | cut -d\' \' -f1)" == "$EXPECTED_SHA" ]]; then\n' +
+  '  echo "create_ap is already installed and verified at $DEST."\n' +
+  '  exit 0\n' +
+  'fi\n' +
+  '\n' +
+  'echo "==> Checking dependencies..."\n' +
+  'missing=()\n' +
+  'for p in hostapd dnsmasq iw iproute2 procps-ng util-linux; do\n' +
+  '  pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p")\n' +
+  'done\n' +
+  'command -v iptables >/dev/null 2>&1 || missing+=("iptables")\n' +
+  'if (( ${#missing[@]} > 0 )); then\n' +
+  '  sudo pacman -S --needed --noconfirm "${missing[@]}"\n' +
+  'fi\n' +
+  '\n' +
+  'BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/create-ap.XXXXXX")\n' +
+  'chmod 700 "$BUILD_DIR"\n' +
+  'trap \'rm -rf "$BUILD_DIR"\' EXIT HUP INT QUIT TERM\n' +
+  'echo "==> Fetching create_ap at pinned commit ${UPSTREAM_COMMIT}..."\n' +
+  'curl -fsSL --proto \'=https\' --tlsv1.2 -o "$BUILD_DIR/create_ap" "$URL" || { echo "Download failed" >&2; exit 1; }\n' +
+  'echo "==> Verifying checksum..."\n' +
+  'if [[ "$(sha256sum "$BUILD_DIR/create_ap" | cut -d\' \' -f1)" != "$EXPECTED_SHA" ]]; then\n' +
+  '  echo "Error: checksum mismatch, refusing to install." >&2\n' +
+  '  exit 1\n' +
+  'fi\n' +
+  'sudo install -D -m 0755 -o root -g root "$BUILD_DIR/create_ap" "$DEST"\n' +
+  'echo "==> Installed $DEST (no GUI, no Polkit rule)."\n'
 
 function parseQrMatrix(raw) {
   var lines = String(raw || "").trim().split(/\r?\n/).filter(function(line) { return line !== "" })

@@ -128,6 +128,7 @@ Panel {
   property string hotspotName: "Hotspot"
   property string hotspotSsid: "Omarchy-Hotspot"
   property string hotspotPassword: ""
+  property bool hotspotInsecurePackage: false
   property string hotspotBand: "bg"
   property bool hotspotActive: false
   property string hotspotDevice: ""
@@ -1076,6 +1077,7 @@ Panel {
       var data = JSON.parse(raw.trim())
       if (data) {
         root.hasHotspotSupport = !!data.hasAp
+        root.hotspotInsecurePackage = !!data.insecureWihotspot
         root.hotspotName = data.name || "Hotspot"
         root.hotspotSsid = data.ssid || "Omarchy-Hotspot"
         root.hotspotPassword = data.password || ""
@@ -2407,7 +2409,7 @@ Panel {
             }
             if (root.hotspotWifiConnected) {
               if (!root.hotspotHasCreateAp) {
-                return "󰤮 Simultaneous Wi-Fi repeater requires linux-wifi-hotspot"
+                return "󰤮 Simultaneous Wi-Fi repeater requires create_ap (use Install Repeater)"
               }
               var bandName = root.hotspotConnectedBand === "a" ? "5 GHz" : (root.hotspotConnectedBand === "bg" ? "2.4 GHz" : "")
               var bandSuffix = bandName !== "" ? " (" + bandName + ")" : ""
@@ -2415,9 +2417,22 @@ Panel {
                 ? "󰤨 Repeater ready" + bandSuffix + " · Shares active Wi-Fi without disconnecting"
                 : "󰤩 Channel restricted (no-IR) on active Wi-Fi · Connect to 2.4GHz Wi-Fi to repeat"
             }
-            return root.hotspotHasCreateAp ? "Standard Wi-Fi Access Point" : "Standard Wi-Fi AP (Install linux-wifi-hotspot for repeater)"
+            return root.hotspotHasCreateAp ? "Standard Wi-Fi Access Point" : "Standard Wi-Fi AP (Install create_ap for repeater and Ethernet sharing)"
           }
           color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          width: parent.width
+        }
+
+        // The linux-wifi-hotspot package ships a Polkit policy that gives every active
+        // local user a passwordless root create_ap / GUI. Say so, and how to remove it.
+        Text {
+          visible: root.hotspotInsecurePackage
+          textFormat: Text.PlainText
+          text: "󰀪 The linux-wifi-hotspot package is installed. Its Polkit rule lets any local user run root commands without a password. Remove it: sudo pacman -Rns linux-wifi-hotspot (this plugin only needs create_ap)"
+          color: Color.urgent
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -2575,7 +2590,7 @@ Panel {
               width: visible ? (parent.width - Style.space(6)) / 2 : 0
               text: "Install Repeater"
               iconText: "󰏔"
-              tooltipText: "Install linux-wifi-hotspot from AUR for Wi-Fi repeater chaining"
+              tooltipText: "Install the verified create_ap script (no GUI, no Polkit rule) for Wi-Fi repeater and Ethernet sharing"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
