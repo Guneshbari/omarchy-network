@@ -662,6 +662,93 @@ Panel {
     onExited: textToCopy = ""
   }
 
+  // ---- Bounded clipboard paste -------------------------------------------------
+  // Qt's own paste (Ctrl+V, Shift+Insert, middle-click) ends in QClipboard::text().
+  // On Wayland that reads the clipboard owner's data in a loop on the GUI thread
+  // whose 1 s poll deadline restarts after every chunk, with no total time limit
+  // and no size cap, so a hostile owner can freeze the shell or exhaust its memory.
+  // Every editable field routes paste here instead: a child process with a hard 1 s
+  // limit and a 2 KiB cap. A failure (timeout, oversize, no text) pastes nothing.
+  property Item pasteTarget: null
+  property int pasteMaxChars: 128
+  property bool pasteGotText: false
+  property bool pasteGotExit: false
+  property bool pasteExitOk: false
+  property string pasteBuf: ""
+
+  function isPasteKey(event) {
+    return event.matches(StandardKey.Paste)
+      || event.key === Qt.Key_Paste
+      || (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier))
+      || (event.key === Qt.Key_Insert && (event.modifiers & Qt.ShiftModifier))
+  }
+
+  function boundedPaste(field, maxChars) {
+    if (!field || pasteProc.running) return
+    root.pasteTarget = field
+    root.pasteMaxChars = maxChars > 0 ? maxChars : 128
+    root.pasteGotText = false
+    root.pasteGotExit = false
+    root.pasteExitOk = false
+    root.pasteBuf = ""
+    pasteProc.running = true
+  }
+
+  function pasteMaybeFinish() {
+    if (!root.pasteGotText || !root.pasteGotExit) return
+    var ok = root.pasteExitOk
+    var raw = root.pasteBuf
+    var f = root.pasteTarget
+    root.pasteGotText = false
+    root.pasteGotExit = false
+    root.pasteBuf = ""
+    root.pasteTarget = null
+    if (!ok || !f) return
+    var t = String(raw || "").replace(/[\u0000-\u001f\u007f]/g, "")
+    if (t === "") return
+    // The fields are TextField-like but some are Ui wrappers, so feature-detect
+    // instead of assuming the whole TextInput API is present.
+    var cur = (typeof f.cursorPosition === "number") ? f.cursorPosition : String(f.text || "").length
+    var selA = cur
+    var selB = cur
+    if (f.selectedText && typeof f.selectionStart === "number" && typeof f.selectionEnd === "number") {
+      selA = Math.min(f.selectionStart, f.selectionEnd)
+      selB = Math.max(f.selectionStart, f.selectionEnd)
+    }
+    var cur_text = String(f.text || "")
+    var room = root.pasteMaxChars - (cur_text.length - (selB - selA))
+    if (room <= 0) return
+    var ins = t.slice(0, room)
+    if (typeof f.remove === "function" && typeof f.insert === "function") {
+      if (selB > selA) f.remove(selA, selB)
+      f.insert(selA, ins)
+    } else {
+      f.text = cur_text.slice(0, selA) + ins + cur_text.slice(selB)
+      if (typeof f.cursorPosition === "number") f.cursorPosition = selA + ins.length
+    }
+  }
+
+  Process {
+    id: pasteProc
+    // pipefail: a timeout (124), an oversize clipboard (SIGPIPE) or a missing
+    // wl-paste all fail the pipeline, and a failed paste inserts nothing.
+    command: ["bash", "-c", "set -o pipefail; timeout 1 wl-paste --no-newline --type text/plain 2>/dev/null | head -c 2048"]
+    stdout: StdioCollector {
+      id: pasteStdout
+      waitForEnd: true
+      onStreamFinished: {
+        root.pasteBuf = String(pasteStdout.text || "")
+        root.pasteGotText = true
+        root.pasteMaybeFinish()
+      }
+    }
+    onExited: function(exitCode) {
+      root.pasteExitOk = exitCode === 0
+      root.pasteGotExit = true
+      root.pasteMaybeFinish()
+    }
+  }
+
   function copyToClipboard(value, sensitive) {
     if (!value) return
     clipboardProc.sensitive = !!sensitive
@@ -1393,8 +1480,8 @@ Panel {
     // accepts any host with a valid certificate for an unrelated domain).
     if (!Model.isValidServerDomain(dom)) return
     runNetworkAction("connect", networkForSsid(ssid), function(network) {
-      enterpriseConnect.secret = passphrase
-      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity, ca, dom]
+      enterpriseConnect.secret = passphrase + "\n" + identity
+      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, ca, dom]
       enterpriseConnect.running = true
       root.passwordText = ""
       root.identityText = ""
@@ -2053,7 +2140,7 @@ Panel {
             width: parent.width
 
             readonly property string title: {
-              if (root.info.type === "wifi") return root.info.ssid || "Wi-Fi"
+              if (root.info.type === "wifi") return Model.displayText(root.info.ssid) || "Wi-Fi"
               if (root.info.type === "ethernet") return "Ethernet"
               return root.info.iface || (root.kind === "disconnected" ? "Disconnected" : "No connection")
             }
@@ -2317,6 +2404,7 @@ Panel {
               implicitHeight: hotspotBadgeText.implicitHeight + Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 id: hotspotBadgeText
                 anchors.centerIn: parent
                 text: root.hotspotActive
@@ -2341,6 +2429,7 @@ Panel {
               implicitHeight: hotspotRepeaterBadgeText.implicitHeight + Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 id: hotspotRepeaterBadgeText
                 anchors.centerIn: parent
                 text: "󰤨 REPEATER"
@@ -2397,6 +2486,7 @@ Panel {
 
         // Subtitle / capability hint
         Text {
+          textFormat: Text.PlainText
           visible: root.hotspotStatusMsg === ""
           text: {
             if (root.hotspotActive) {
@@ -2467,6 +2557,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
+                textFormat: Text.PlainText
                 text: "SSID / NETWORK"
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
@@ -2476,7 +2567,7 @@ Panel {
 
               Text {
                 textFormat: Text.PlainText
-                text: root.hotspotSsid
+                text: Model.displayText(root.hotspotSsid, 32)
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -2491,6 +2582,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
+                textFormat: Text.PlainText
                 readonly property string activeBand: (!root.hotspotEthernetConnected && root.hotspotWifiConnected && root.hotspotConnectedBand)
                   ? (root.hotspotConnectedBand === "a" ? "5 GHz" : "2.4 GHz")
                   : (root.hotspotBand === "a" ? "5 GHz" : "2.4 GHz")
@@ -2507,6 +2599,7 @@ Panel {
                 anchors.right: parent.right
 
                 Text {
+                  textFormat: Text.PlainText
                   id: hotspotPwdDisplay
                   text: root.hotspotPasswordVisible ? root.hotspotPassword : "••••••••"
                   color: root.bar.foreground
@@ -2619,6 +2712,7 @@ Panel {
               width: parent.width
 
               Text {
+                textFormat: Text.PlainText
                 text: "CONNECTED DEVICES (" + root.hotspotClients + ")"
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
@@ -2630,6 +2724,7 @@ Panel {
               Item { Layout.fillWidth: true }
 
               Text {
+                textFormat: Text.PlainText
                 visible: root.hotspotClients > 0
                 text: root.hotspotClients === 1 ? "1 device" : (root.hotspotClients + " devices")
                 color: Color.accent
@@ -2655,6 +2750,7 @@ Panel {
                 spacing: Style.space(6)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰤮"
                   color: Qt.darker(root.bar.foreground, 2.0)
                   font.family: root.bar.fontFamily
@@ -2663,6 +2759,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Waiting for devices to connect..."
                   color: Qt.darker(root.bar.foreground, 1.8)
                   font.family: root.bar.fontFamily
@@ -2694,6 +2791,7 @@ Panel {
 
                   // Device Icon
                   Text {
+                    textFormat: Text.PlainText
                     text: {
                       var n = (modelData.name || "").toLowerCase()
                       var v = (modelData.vendor || "").toLowerCase()
@@ -2719,7 +2817,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: modelData.name || modelData.ip || modelData.mac
+                      text: Model.displayText(modelData.name || modelData.ip || modelData.mac, 64)
                       color: root.bar.foreground
                       font.family: root.bar.fontFamily
                       font.pixelSize: Style.font.bodySmall
@@ -2749,6 +2847,7 @@ Panel {
                       Layout.alignment: Qt.AlignRight
 
                       Text {
+                        textFormat: Text.PlainText
                         text: {
                           var s = modelData.signal
                           if (s === null || s === undefined) return "󰤨"
@@ -2763,6 +2862,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         text: (modelData.signal !== null && modelData.signal !== undefined) ? (modelData.signal + " dBm") : ""
                         color: Qt.darker(root.bar.foreground, 1.3)
                         font.family: root.bar.fontFamily
@@ -2772,6 +2872,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       visible: !!(modelData.txBitrate || modelData.connectedTime)
                       text: modelData.txBitrate ? modelData.txBitrate : (modelData.connectedTime ? ("up " + modelData.connectedTime) : "")
                       color: Qt.darker(root.bar.foreground, 1.6)
@@ -2798,6 +2899,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "HOTSPOT SSID (NAME)"
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
@@ -2807,6 +2909,7 @@ Panel {
 
             TextField {
               id: hotspotSsidField
+              maxLength: 32
               width: parent.width
               text: root.hotspotDraftSsid
               font.family: root.bar.fontFamily
@@ -2823,6 +2926,7 @@ Panel {
               onTextChanged: root.hotspotDraftSsid = text
               onActiveFocusChanged: root.hotspotInputFocused = activeFocus
               Keys.onPressed: function(event) {
+                if (root.isPasteKey(event)) { root.boundedPaste(hotspotSsidField, 32); event.accepted = true; return }
                 if (event.key === Qt.Key_Tab || event.key === Qt.Key_Down) {
                   hotspotPasswordField.forceActiveFocus()
                   event.accepted = true
@@ -2831,6 +2935,8 @@ Panel {
                   event.accepted = true
                 }
               }
+              // Swallow middle-click so Qt never pastes the primary selection itself.
+              MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
             }
           }
 
@@ -2839,6 +2945,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "WPA2 PASSPHRASE (MIN 8 CHARS)"
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
@@ -2848,6 +2955,7 @@ Panel {
 
             TextField {
               id: hotspotPasswordField
+              maxLength: 63
               width: parent.width
               text: root.hotspotDraftPassword
               font.family: root.bar.fontFamily
@@ -2865,6 +2973,7 @@ Panel {
               onTextChanged: root.hotspotDraftPassword = text
               onActiveFocusChanged: root.hotspotInputFocused = activeFocus
               Keys.onPressed: function(event) {
+                if (root.isPasteKey(event)) { root.boundedPaste(hotspotPasswordField, 63); event.accepted = true; return }
                 if (event.key === Qt.Key_Tab || event.key === Qt.Key_Down) {
                   hotspotSaveBtn.forceActiveFocus()
                   event.accepted = true
@@ -2876,6 +2985,8 @@ Panel {
                   event.accepted = true
                 }
               }
+              // Swallow middle-click so Qt never pastes the primary selection itself.
+              MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
             }
           }
 
@@ -2937,6 +3048,7 @@ Panel {
             spacing: Style.space(6)
 
             Text {
+              textFormat: Text.PlainText
               text: "󰤨"
               color: Color.accent
               font.family: root.bar.fontFamily
@@ -2945,6 +3057,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width - Style.space(18)
               wrapMode: Text.WordWrap
               text: "Locked to " + (root.hotspotConnectedBand === "a" ? "5 GHz" : "2.4 GHz") + " · Single-radio repeaters must mirror your active Wi-Fi band."
@@ -3058,7 +3171,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          text: (root.wiredConnectionName ? root.wiredConnectionName : "Wired connection 1") +
+          text: (root.wiredConnectionName ? Model.displayText(root.wiredConnectionName, 48) : "Wired connection 1") +
                 (root.wiredDeviceName ? "  •  " + root.wiredDeviceName : "")
           color: Qt.darker(root.bar.foreground, 1.4)
           font.family: root.bar.fontFamily
@@ -3068,6 +3181,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: "IPv4 CONFIGURATION"
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -3145,6 +3259,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "Addresses"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -3154,6 +3269,7 @@ Panel {
 
             TextField {
               id: wiredAddrField
+              maxLength: 128
               width: parent.width
               placeholderText: "e.g. 192.168.1.50/24"
               text: root.wiredAddresses
@@ -3192,6 +3308,11 @@ Panel {
                 keyCatcher.forceActiveFocus()
                 event.accepted = true
               }
+              Keys.onPressed: function(event) {
+                if (root.isPasteKey(event)) { root.boundedPaste(wiredAddrField, 128); event.accepted = true; return }
+              }
+              // Swallow middle-click so Qt never pastes the primary selection itself.
+              MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
             }
           }
 
@@ -3200,6 +3321,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "Gateway"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -3209,6 +3331,7 @@ Panel {
 
             TextField {
               id: wiredGwField
+              maxLength: 45
               width: parent.width
               placeholderText: "e.g. 192.168.1.1"
               text: root.wiredGateway
@@ -3233,6 +3356,11 @@ Panel {
                 keyCatcher.forceActiveFocus()
                 event.accepted = true
               }
+              Keys.onPressed: function(event) {
+                if (root.isPasteKey(event)) { root.boundedPaste(wiredGwField, 45); event.accepted = true; return }
+              }
+              // Swallow middle-click so Qt never pastes the primary selection itself.
+              MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
             }
           }
 
@@ -3241,6 +3369,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "DNS servers"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -3250,6 +3379,7 @@ Panel {
 
             TextField {
               id: wiredDnsField
+              maxLength: 128
               width: parent.width
               placeholderText: "e.g. 1.1.1.1, 8.8.8.8"
               text: root.wiredDns
@@ -3288,6 +3418,11 @@ Panel {
                 keyCatcher.forceActiveFocus()
                 event.accepted = true
               }
+              Keys.onPressed: function(event) {
+                if (root.isPasteKey(event)) { root.boundedPaste(wiredDnsField, 128); event.accepted = true; return }
+              }
+              // Swallow middle-click so Qt never pastes the primary selection itself.
+              MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
             }
           }
 
@@ -3354,6 +3489,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.wiredSelectedMethod === "auto"
           text: root.wiredMethod === "auto" ? "Using DHCP automatically" : "Changed to Automatic. Click Apply to save."
           color: Qt.darker(root.bar.foreground, 1.4)
@@ -3776,7 +3912,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          text: row.net ? (row.net.ssid || "Hidden") : ""
+          text: row.net ? (Model.displayText(row.net.ssid) || "Hidden") : ""
           color: root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.body
@@ -3833,6 +3969,7 @@ Panel {
 
       TextField {
         id: idField
+        maxLength: 128
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -3855,10 +3992,16 @@ Panel {
 
         onVisibleChanged: if (visible) Qt.callLater(forceActiveFocus)
         Component.onCompleted: if (visible) Qt.callLater(forceActiveFocus)
+        Keys.onPressed: function(event) {
+          if (root.isPasteKey(event)) { root.boundedPaste(idField, 128); event.accepted = true; return }
+        }
+        // Swallow middle-click so Qt never pastes the primary selection itself.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
       }
 
       TextField {
         id: domainField
+        maxLength: 253
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -3881,10 +4024,16 @@ Panel {
         Keys.onTabPressed: function(event) { pwField.forceActiveFocus(); event.accepted = true }
         Keys.onUpPressed: function(event) { idField.forceActiveFocus(); event.accepted = true }
         Keys.onBacktabPressed: function(event) { idField.forceActiveFocus(); event.accepted = true }
+        Keys.onPressed: function(event) {
+          if (root.isPasteKey(event)) { root.boundedPaste(domainField, 253); event.accepted = true; return }
+        }
+        // Swallow middle-click so Qt never pastes the primary selection itself.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
       }
 
       TextField {
         id: pwField
+        maxLength: 128
         visible: !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -3925,6 +4074,11 @@ Panel {
 
         onVisibleChanged: if (visible && !row.isEnterprise) Qt.callLater(forceActiveFocus)
         Component.onCompleted: if (visible && !row.isEnterprise) Qt.callLater(forceActiveFocus)
+        Keys.onPressed: function(event) {
+          if (root.isPasteKey(event)) { root.boundedPaste(pwField, 128); event.accepted = true; return }
+        }
+        // Swallow middle-click so Qt never pastes the primary selection itself.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.MiddleButton; onPressed: function(mouse) { mouse.accepted = true } }
       }
 
       BorderSurface {
@@ -4059,7 +4213,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: (root.hotspotSsid || (root.hotspotIsRepeater ? "Repeater" : "Hotspot")).toUpperCase()
+            text: (Model.displayText(root.hotspotSsid, 32) || (root.hotspotIsRepeater ? "Repeater" : "Hotspot")).toUpperCase()
             color: Qt.rgba(1, 1, 1, 0.55)
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -4108,6 +4262,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.hotspotQrLoading
             text: "Generating QR code…"
             color: Qt.rgba(1, 1, 1, 0.55)
@@ -4131,6 +4286,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.hotspotQrShowingCode
             text: root.hotspotIsRepeater ? "Scan to join repeater network" : "Scan to join this network"
             color: Qt.rgba(1, 1, 1, 0.55)
@@ -4162,6 +4318,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: "•"
               color: Qt.rgba(1, 1, 1, 0.3)
               font.family: Style.font.family
@@ -4185,6 +4342,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.hotspotQrShowingCode && root.hotspotPassword === ""
             text: "Open network (no password)"
             color: Qt.rgba(1, 1, 1, 0.55)

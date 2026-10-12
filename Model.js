@@ -261,6 +261,22 @@ function formatPingLatency(ms, hasSamples) {
   return value.toFixed(value > 0 && value < 10 ? 1 : 0) + " ms"
 }
 
+// Network names are chosen by whoever runs the access point. Strip what lets a name
+// hide or lie about itself on screen: C0/C1 controls, zero-width and
+// bidirectional-override characters (an RLO can make "evil" read as another name),
+// invisible formatting and tag characters. Display only: callers keep the raw name
+// for matching and for passing to NetworkManager.
+function displayText(value, maxLength) {
+  var limit = maxLength > 0 ? maxLength : 64
+  var text = String(value === undefined || value === null ? "" : value)
+  text = text.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|\udb40[\udc00-\udc7f]/g, "")
+  if (text.length > limit) text = text.slice(0, limit - 1) + "\u2026"
+  return text
+}
+
+// A radio flooding fake beacons must not be able to grow the list without bound.
+var MAX_WIFI_ROWS = 150
+
 function wifiRow(network) {
   if (!network) return null
   // Primitives only: rows become list-model data, so a WifiNetwork here puts a
@@ -284,7 +300,7 @@ function sortWifiRows(rows) {
     if (a.known !== b.known) return a.known ? -1 : 1
     return b.signal - a.signal
   })
-  return nets
+  return nets.slice(0, MAX_WIFI_ROWS)
 }
 
 function wifiSectionTitle(wifiNetworks, index) {
@@ -325,13 +341,16 @@ function canForgetNetwork(network) {
 // with it either).
 var enterpriseConnectScript =
   'u=$(uuidgen) || exit 1\n' +
+  '# stdin line 1: password, line 2: identity. Neither may appear in any argv (/proc\n' +
+  '# is world-readable), so both reach NetworkManager through the editor on stdin.\n' +
   'IFS= read -r pw\n' +
+  'IFS= read -r identity\n' +
   'pw=$(printf "%s" "$pw" | tr -d "\\r\\n")\n' +
+  'identity=$(printf "%s" "$identity" | tr -d "\\r\\n")\n' +
   'if [[ -z "$pw" ]]; then exit 1; fi\n' +
   'ssid=$(printf "%s" "$1" | tr -d "\\r\\n")\n' +
-  'identity=$(printf "%s" "$2" | tr -d "\\r\\n")\n' +
-  'ca_cert=$(printf "%s" "$3" | tr -d "\\r\\n")\n' +
-  'domain=$(printf "%s" "$4" | tr -d "\\r\\n")\n' +
+  'ca_cert=$(printf "%s" "$2" | tr -d "\\r\\n")\n' +
+  'domain=$(printf "%s" "$3" | tr -d "\\r\\n")\n' +
   'if [[ -z "$ssid" || -z "$identity" ]]; then exit 1; fi\n' +
   '# The expected authentication-server name is mandatory. A trusted CA alone is not\n' +
   '# enough: any host with a valid certificate for an unrelated domain could otherwise\n' +
@@ -348,8 +367,8 @@ var enterpriseConnectScript =
   'trap \'nmcli connection delete uuid "$u" >/dev/null 2>&1 || true\' HUP INT TERM\n' +
   'nmcli connection add type wifi con-name "$ssid" ssid "$ssid" connection.uuid "$u" \\\n' +
   '  wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2 \\\n' +
-  '  802-1x.identity "$identity" "${ca_args[@]}" 802-1x.auth-timeout 8 >/dev/null \\\n' +
-  '  && printf "set 802-1x.password %s\\nsave\\nquit\\n" "$pw" | nmcli connection edit uuid "$u" >/dev/null \\\n' +
+  '  802-1x.identity placeholder "${ca_args[@]}" 802-1x.auth-timeout 8 >/dev/null \\\n' +
+  '  && printf "set 802-1x.identity %s\\nset 802-1x.password %s\\nsave\\nquit\\n" "$identity" "$pw" | nmcli connection edit uuid "$u" >/dev/null \\\n' +
   '  && nmcli connection up uuid "$u" \\\n' +
   '  || { nmcli connection delete uuid "$u" >/dev/null 2>&1; exit 1; }\n'
 
@@ -430,6 +449,7 @@ var createApRootHelper =
   '# here, inside the privileged context, before create_ap ever touches it. No\n' +
   '# passphrase is passed through here: create_ap reads it from a private --config file.\n' +
   'set -u\n' +
+  'export PATH=/usr/sbin:/usr/bin:/sbin:/bin\n' +
   'umask 022\n' +
   'common=/tmp/create_ap.common.conf\n' +
   '\n' +
@@ -806,15 +826,21 @@ var hotspotQueryScript =
   '}' +
   'END {' +
   '  first = 1;' +
+  '  cnt = 0;' +
   '  printf "[";' +
   '  for (m in seen) {' +
   '    if (m == "" || m == "00:00:00:00:00:00") continue;' +
+  '    if (cnt++ >= 64) break;' +
   '    ip = (m in client_ip) ? client_ip[m] : "";' +
   '    host = (m in client_host) ? client_host[m] : "";' +
   '    sig = (m in client_sig) ? client_sig[m] : "";' +
   '    tx = (m in client_tx) ? client_tx[m] : "";' +
   '    rx = (m in client_rx) ? client_rx[m] : "";' +
   '    ct = (m in client_ct) ? client_ct[m] : "";' +
+  '    gsub("[^0-9A-Za-z./ ()-]", "", tx); tx = substr(tx, 1, 40);' +
+  '    gsub("[^0-9A-Za-z./ ()-]", "", rx); rx = substr(rx, 1, 40);' +
+  '    gsub("[^0-9A-Za-z ]", "", ct); ct = substr(ct, 1, 20);' +
+  '    if (ip !~ /^[0-9A-Fa-f:.]+$/ || length(ip) > 45) ip = "";' +
   '    if (host != "") {' +
   '      name = host;' +
   '    } else {' +
@@ -1313,6 +1339,8 @@ if (typeof module !== "undefined") {
     requiresCredentials: requiresCredentials,
     canForgetNetwork: canForgetNetwork,
     isValidServerDomain: isValidServerDomain,
+    displayText: displayText,
+    MAX_WIFI_ROWS: MAX_WIFI_ROWS,
     ethDetectFunction: ethDetectFunction,
     createApRootHelper: createApRootHelper,
     enterpriseConnectScript: enterpriseConnectScript,
