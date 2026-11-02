@@ -438,50 +438,55 @@ var ethDetectFunction =
   '  return 1\n' +
   '}\n'
 
-// Runs as root through pkexec. Verifies create_ap's shared /tmp state before
-// create_ap runs (it kill -9s PIDs read from files there) and never sees a
-// passphrase: that reaches create_ap only through a private --config file.
+// SHA-256 of the exact create_ap build this plugin installs and the root helper will
+// run: upstream linux-wifi-hotspot 5.0.0 (63c2168626a0b13015913d52d5dbd5e1d91a7fb6)
+// after one fixed transformation (see installRepeaterScript) that moves all of its
+// runtime state from world-writable /tmp to the root-only /run/create_ap.
+var createApPatchedSha256 = "71f675c926e70211f814154068f56189917a7e967ed7f3db8153cb67c17c5ea2"
+
+// Runs as root through pkexec. Executes only that exact build, so the state it keeps
+// (including the *.pid files it later kill -9s) is never somewhere another user can
+// write; it never sees a passphrase (that reaches create_ap only through a private
+// --config file).
 var createApRootHelper =
   '# create-ap-root <start|stop> [create_ap args]\n' +
-  '# Runs as root (pkexec). create_ap keeps shared state in /tmp/create_ap.common.conf\n' +
-  '# and, on cleanup, runs kill -9 on whatever PID is written in its *.pid files. Any\n' +
-  '# local user can pre-create that directory in /tmp, so it is verified (or replaced)\n' +
-  '# here, inside the privileged context, before create_ap ever touches it. No\n' +
-  '# passphrase is passed through here: create_ap reads it from a private --config file.\n' +
+  '# Runs as root (pkexec). It executes ONLY the audited create_ap build that this plugin\n' +
+  '# installs: byte-identical to a pinned SHA-256, root-owned, not writable by anyone else.\n' +
+  '# That build keeps every piece of its runtime state (shared dir, mutex lock files,\n' +
+  '# per-instance dirs, the *.pid files whose contents it later kill -9s) under\n' +
+  '# /run/create_ap, a directory only root can create or modify. Upstream keeps all of\n' +
+  '# that in world-writable /tmp, where another local user can recreate a deleted\n' +
+  '# directory and plant a PID at any moment, so no check made before exec can be trusted.\n' +
+  '# With nothing attacker-writable left to check there is no time-of-check/time-of-use\n' +
+  '# window. No passphrase is passed through here: create_ap reads it from a private\n' +
+  '# --config file.\n' +
   'set -u\n' +
   'export PATH=/usr/sbin:/usr/bin:/sbin:/bin\n' +
   'umask 022\n' +
-  'common=/tmp/create_ap.common.conf\n' +
+  'PINNED_SHA="' + createApPatchedSha256 + '"\n' +
+  'rundir=/run/create_ap\n' +
+  'bin=/usr/local/bin/create_ap\n' +
   '\n' +
-  'harden_common() {\n' +
-  '  local mode f\n' +
-  '  if [[ ! -k /tmp ]]; then\n' +
-  '    echo "Refusing to run: /tmp is not sticky" >&2\n' +
-  '    return 1\n' +
-  '  fi\n' +
-  '  if [[ -L "$common" ]]; then\n' +
-  '    rm -f -- "$common" || return 1\n' +
-  '  fi\n' +
-  '  if [[ -e "$common" ]]; then\n' +
-  '    mode=$(stat -c %a -- "$common" 2>/dev/null || echo 777)\n' +
-  '    if [[ ! -d "$common" || "$(stat -c %u -- "$common" 2>/dev/null)" != 0 || $(( 8#$mode & 8#022 )) -ne 0 ]]; then\n' +
-  '      rm -rf --one-file-system -- "$common" || return 1\n' +
-  '    fi\n' +
-  '  fi\n' +
-  '  if [[ ! -e "$common" ]]; then\n' +
-  '    mkdir -m 0755 -- "$common" 2>/dev/null || true\n' +
-  '  fi\n' +
-  '  if [[ -L "$common" || ! -d "$common" || "$(stat -c %u -- "$common" 2>/dev/null)" != 0 ]]; then\n' +
-  '    echo "Refusing to run: cannot secure $common" >&2\n' +
-  '    return 1\n' +
-  '  fi\n' +
-  '  for f in "$common"/*.pid; do\n' +
-  '    [[ -e "$f" || -L "$f" ]] || continue\n' +
-  '    if [[ -L "$f" || ! -f "$f" || "$(stat -c %u -- "$f" 2>/dev/null)" != 0 ]]; then\n' +
-  '      rm -f -- "$f"\n' +
-  '    fi\n' +
-  '  done\n' +
-  '  return 0\n' +
+  'not_writable_by_others() {\n' +
+  '  [[ "$(stat -c %u -- "$1" 2>/dev/null)" == 0 ]] && (( ( 8#$(stat -c %a -- "$1" 2>/dev/null || echo 777) & 8#022 ) == 0 ))\n' +
+  '}\n' +
+  '\n' +
+  'refuse() {\n' +
+  '  echo "$1" >&2\n' +
+  '  exit 1\n' +
+  '}\n' +
+  '\n' +
+  '# The binary, and the directory that holds it, must be root-only; then it must be\n' +
+  '# exactly the build we shipped. An unpatched or locally modified create_ap is refused.\n' +
+  '[[ -f "$bin" && ! -L "$bin" ]] || refuse "create_ap is not installed. Use Install Repeater."\n' +
+  'not_writable_by_others "$bin" || refuse "create_ap is writable by non-root users; refusing to run it."\n' +
+  'not_writable_by_others /usr/local/bin || refuse "/usr/local/bin is writable by non-root users; refusing to run create_ap."\n' +
+  '[[ "$(sha256sum -- "$bin" | cut -d" " -f1)" == "$PINNED_SHA" ]] || refuse "create_ap is not the verified build. Re-run Install Repeater."\n' +
+  '\n' +
+  'secure_rundir() {\n' +
+  '  [[ ! -L "$rundir" ]] || refuse "$rundir is a symlink; refusing to run."\n' +
+  '  [[ -e "$rundir" ]] || mkdir -m 0755 -- "$rundir" || refuse "cannot create $rundir"\n' +
+  '  [[ -d "$rundir" ]] && not_writable_by_others "$rundir" || refuse "$rundir is not a root-only directory; refusing to run."\n' +
   '}\n' +
   '\n' +
   'is_create_ap_pid() {\n' +
@@ -496,7 +501,7 @@ var createApRootHelper =
   '# Stale dnsmasq left behind by a create_ap instance that is no longer running.\n' +
   'reap_stale_dnsmasq() {\n' +
   '  local d pid dp\n' +
-  '  for d in /tmp/create_ap.*.conf.*; do\n' +
+  '  for d in "$rundir"/create_ap.*.conf.*; do\n' +
   '    [[ -d "$d" ]] && owned_by_root "$d" || continue\n' +
   '    pid=$(cat "$d/pid" 2>/dev/null)\n' +
   '    is_create_ap_pid "$pid" && continue\n' +
@@ -509,33 +514,19 @@ var createApRootHelper =
   '  done\n' +
   '}\n' +
   '\n' +
-  '# Only a root-owned create_ap that nobody else can write to is ever executed.\n' +
-  'create_ap_bin=""\n' +
-  'for c in /usr/local/bin/create_ap /usr/bin/create_ap; do\n' +
-  '  if [[ -f "$c" && -x "$c" && ! -L "$c" && "$(stat -c %u -- "$c" 2>/dev/null)" == 0 ]] \\\n' +
-  '    && (( ( 8#$(stat -c %a -- "$c" 2>/dev/null || echo 777) & 8#022 ) == 0 )); then\n' +
-  '    create_ap_bin="$c"\n' +
-  '    break\n' +
-  '  fi\n' +
-  'done\n' +
-  'if [[ -z "$create_ap_bin" ]]; then\n' +
-  '  echo "create_ap is not installed (or is writable by non-root users)" >&2\n' +
-  '  exit 1\n' +
-  'fi\n' +
-  '\n' +
   'case "${1:-}" in\n' +
   '  start)\n' +
   '    shift\n' +
-  '    harden_common || exit 1\n' +
+  '    secure_rundir\n' +
   '    reap_stale_dnsmasq\n' +
-  '    exec "$create_ap_bin" "$@"\n' +
+  '    exec "$bin" "$@"\n' +
   '    ;;\n' +
   '  stop)\n' +
-  '    harden_common || exit 1\n' +
-  '    for d in /tmp/create_ap.*.conf.*; do\n' +
+  '    secure_rundir\n' +
+  '    for d in "$rundir"/create_ap.*.conf.*; do\n' +
   '      [[ -d "$d" ]] && owned_by_root "$d" && owned_by_root "$d/pid" || continue\n' +
   '      pid=$(cat "$d/pid" 2>/dev/null)\n' +
-  '      is_create_ap_pid "$pid" && "$create_ap_bin" --stop "$pid" >/dev/null 2>&1\n' +
+  '      is_create_ap_pid "$pid" && "$bin" --stop "$pid" >/dev/null 2>&1\n' +
   '    done\n' +
   '    reap_stale_dnsmasq\n' +
   '    exit 0\n' +
@@ -680,7 +671,7 @@ var hotspotQueryScript =
   'has_ap="false"; ' +
   'if [[ -n "$dev" ]] && iw list 2>/dev/null | grep -A 8 "Supported interface modes" | grep -q "AP"; then has_ap="true"; fi; ' +
   'has_create_ap="false"; ' +
-  'if [[ -x /usr/local/bin/create_ap || -x /usr/bin/create_ap ]]; then has_create_ap="true"; fi; ' +
+  'if [[ -f /usr/local/bin/create_ap && ! -L /usr/local/bin/create_ap ]] && grep -q -F "/run/create_ap/create_ap." /usr/local/bin/create_ap 2>/dev/null; then has_create_ap="true"; fi; ' +
   'insecure_pkg="false"; ' +
   'for pf in /usr/share/polkit-1/actions/*.policy; do ' +
   '  [[ -f "$pf" ]] || continue; ' +
@@ -705,7 +696,7 @@ var hotspotQueryScript =
   '  fi; ' +
   'fi; ' +
   '  cap_running="false"; cap_ssid=""; cap_pwd=""; cap_band="bg"; cap_iface=""; cap_uplink=""; ' +
-  'for d in /tmp/create_ap.*.conf.*; do ' +
+  'for d in /run/create_ap/create_ap.*.conf.*; do ' +
   '  if [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]]; then ' +
   '    if [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]]; then ' +
   '      pid=$(cat "$d/pid" 2>/dev/null); ' +
@@ -749,11 +740,11 @@ var hotspotQueryScript =
   '  ap_iface=""; ' +
   'fi; ' +
   'lease_files=""\n' +
-  'for d in /tmp/create_ap.*.conf.*; do\n' +
+  'for d in /run/create_ap/create_ap.*.conf.*; do\n' +
   '  [[ -d "$d" && ! -L "$d" && "$(stat -c %u "$d" 2>/dev/null)" == 0 ]] || continue\n' +
   '  f="$d/dnsmasq.leases"\n' +
   '  [[ -f "$f" && ! -L "$f" && "$(stat -c %u "$f" 2>/dev/null)" == 0 ]] || continue\n' +
-  '  [[ "$f" =~ ^/tmp/create_ap\\.[A-Za-z0-9_.-]+\\.conf\\.[A-Za-z0-9]+/dnsmasq\\.leases$ ]] || continue\n' +
+  '  [[ "$f" =~ ^/run/create_ap/create_ap\\.[A-Za-z0-9_.-]+\\.conf\\.[A-Za-z0-9]+/dnsmasq\\.leases$ ]] || continue\n' +
   '  lease_files="$lease_files $f"\n' +
   'done\n' +
   'client_json="[]"; ' +
@@ -879,6 +870,7 @@ var hotspotApplyScript =
   'if [[ -z "$ssid" || ${#ssid} -gt 32 || "$ssid" =~ [^[:print:]] ]]; then ssid="Omarchy-Hotspot"; fi\n' +
   'if [[ "$band" != "a" ]]; then band="bg"; fi\n' +
   "ap_helper='" + createApRootHelper + "'\n" +
+  'have_create_ap() { [[ -f /usr/local/bin/create_ap && ! -L /usr/local/bin/create_ap ]] && grep -q -F "/run/create_ap/create_ap." /usr/local/bin/create_ap 2>/dev/null; }\n' +
   'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\')\n' +
   'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi\n' +
   '\n' +
@@ -944,7 +936,7 @@ var hotspotApplyScript =
   'find_ap() {\n' +
   '  local d pid\n' +
   '  ap_pid=""; ap_dir=""\n' +
-  '  for d in /tmp/create_ap.*.conf.*; do\n' +
+  '  for d in /run/create_ap/create_ap.*.conf.*; do\n' +
   '    [[ -d "$d" && ! -L "$d" && -f "$d/pid" && ! -L "$d/pid" ]] || continue\n' +
   '    [[ $(stat -c \'%u\' "$d" 2>/dev/null) -eq 0 && $(stat -c \'%u\' "$d/pid" 2>/dev/null) -eq 0 ]] || continue\n' +
   '    pid=$(cat "$d/pid" 2>/dev/null)\n' +
@@ -984,7 +976,7 @@ var hotspotApplyScript =
   '# there, same as the Wi-Fi repeater). NetworkManager\'s own "shared" mode is only the\n' +
   '# fallback when linux-wifi-hotspot is not installed and there is no Wi-Fi uplink.\n' +
   'use_cap="false"\n' +
-  'if [[ -x /usr/local/bin/create_ap || -x /usr/bin/create_ap ]]; then\n' +
+  'if have_create_ap; then\n' +
   '  if [[ -n "$eth_dev" || "$wifi_connected" == "true" ]]; then use_cap="true"; fi\n' +
   'elif [[ -z "$eth_dev" && "$wifi_connected" == "true" ]]; then\n' +
   '  echo "Wi-Fi is connected. Install linux-wifi-hotspot for simultaneous repeater chaining." >&2\n' +
@@ -1239,19 +1231,26 @@ var hotspotQrScript =
   '  printf "%s\\n" "$row"; ' +
   'done <<<"$ascii"'
 
-// create_ap-only installer. Pinned to an immutable upstream commit and a verified
-// SHA-256. It intentionally avoids the linux-wifi-hotspot package: that package also
-// ships wihotspot-gui and a Polkit policy granting any active local user a
-// passwordless root create_ap / GUI (whose SSID/password reach a shell). Offers to
+// create_ap-only installer. Fetches upstream at an immutable commit, verifies its
+// SHA-256, applies one fixed transformation (all runtime state moves from /tmp to the
+// root-only /run/create_ap) and verifies the SHA-256 of the result, which is the only
+// build the root helper will run. It avoids the linux-wifi-hotspot package: that
+// package also ships wihotspot-gui and a Polkit policy granting any active local user
+// a passwordless root create_ap / GUI (whose SSID/password reach a shell). Offers to
 // remove that package if it is already installed.
 var installRepeaterScript =
   'set -euo pipefail\n' +
-  '# Installs ONLY the create_ap script, pinned to an immutable upstream commit and a\n' +
-  '# verified SHA-256. The linux-wifi-hotspot package is deliberately NOT used: it also\n' +
-  '# installs wihotspot-gui and a Polkit policy that lets any active local user run\n' +
-  '# create_ap / the GUI as root without a password.\n' +
+  '# Installs ONLY the create_ap script, in two verified steps:\n' +
+  '#  1. fetch it from an immutable upstream commit and check the upstream SHA-256;\n' +
+  '#  2. apply one fixed transformation that moves all of its runtime state from\n' +
+  '#     world-writable /tmp to the root-only /run/create_ap, then check the SHA-256 of\n' +
+  '#     the result. The root helper later refuses to run anything else.\n' +
+  '# The linux-wifi-hotspot package is deliberately NOT used: it also installs\n' +
+  '# wihotspot-gui and a Polkit policy that lets any active local user run create_ap /\n' +
+  '# the GUI as root without a password.\n' +
   'UPSTREAM_COMMIT="63c2168626a0b13015913d52d5dbd5e1d91a7fb6"\n' +
-  'EXPECTED_SHA="6ff2bde71be2076781c2d7338bcef53d7a787b2c557230feba76113072911667"\n' +
+  'UPSTREAM_SHA="6ff2bde71be2076781c2d7338bcef53d7a787b2c557230feba76113072911667"\n' +
+  'PATCHED_SHA="' + createApPatchedSha256 + '"\n' +
   'URL="https://raw.githubusercontent.com/lakinduakash/linux-wifi-hotspot/${UPSTREAM_COMMIT}/src/scripts/create_ap"\n' +
   'DEST="/usr/local/bin/create_ap"\n' +
   '\n' +
@@ -1270,7 +1269,7 @@ var installRepeaterScript =
   '  fi\n' +
   'fi\n' +
   '\n' +
-  'if [[ -f "$DEST" && ! -L "$DEST" && "$(stat -c %u "$DEST")" == "0" ]] && [[ "$(sha256sum "$DEST" | cut -d\' \' -f1)" == "$EXPECTED_SHA" ]]; then\n' +
+  'if [[ -f "$DEST" && ! -L "$DEST" && "$(stat -c %u "$DEST")" == "0" ]] && [[ "$(sha256sum "$DEST" | cut -d\' \' -f1)" == "$PATCHED_SHA" ]]; then\n' +
   '  echo "create_ap is already installed and verified at $DEST."\n' +
   '  exit 0\n' +
   'fi\n' +
@@ -1290,13 +1289,23 @@ var installRepeaterScript =
   'trap \'rm -rf "$BUILD_DIR"\' EXIT HUP INT QUIT TERM\n' +
   'echo "==> Fetching create_ap at pinned commit ${UPSTREAM_COMMIT}..."\n' +
   'curl -fsSL --proto \'=https\' --tlsv1.2 -o "$BUILD_DIR/create_ap" "$URL" || { echo "Download failed" >&2; exit 1; }\n' +
-  'echo "==> Verifying checksum..."\n' +
-  'if [[ "$(sha256sum "$BUILD_DIR/create_ap" | cut -d\' \' -f1)" != "$EXPECTED_SHA" ]]; then\n' +
-  '  echo "Error: checksum mismatch, refusing to install." >&2\n' +
+  'echo "==> Verifying upstream checksum..."\n' +
+  'if [[ "$(sha256sum "$BUILD_DIR/create_ap" | cut -d\' \' -f1)" != "$UPSTREAM_SHA" ]]; then\n' +
+  '  echo "Error: upstream checksum mismatch, refusing to install." >&2\n' +
   '  exit 1\n' +
   'fi\n' +
-  'sudo install -D -m 0755 -o root -g root "$BUILD_DIR/create_ap" "$DEST"\n' +
-  'echo "==> Installed $DEST (no GUI, no Polkit rule)."\n'
+  'echo "==> Moving create_ap\'s runtime state from /tmp to /run/create_ap..."\n' +
+  'sed -e \'s#/tmp/create_ap\\.#/run/create_ap/create_ap.#g\' \\\n' +
+  '    -e \'/^COUNTER_LOCK_FILE=/i\\\n' +
+  '# omarchy-network: all create_ap runtime state lives in a root-owned directory, never in /tmp.\\\n' +
+  '[[ $EUID -ne 0 || ( -d /run/create_ap \\&\\& ! -L /run/create_ap ) ]] || mkdir -m 0755 /run/create_ap || exit 1\' \\\n' +
+  '    "$BUILD_DIR/create_ap" > "$BUILD_DIR/create_ap.patched"\n' +
+  'if [[ "$(sha256sum "$BUILD_DIR/create_ap.patched" | cut -d\' \' -f1)" != "$PATCHED_SHA" ]]; then\n' +
+  '  echo "Error: patched checksum mismatch, refusing to install." >&2\n' +
+  '  exit 1\n' +
+  'fi\n' +
+  'sudo install -D -m 0755 -o root -g root "$BUILD_DIR/create_ap.patched" "$DEST"\n' +
+  'echo "==> Installed $DEST (no GUI, no Polkit rule, no shared state in /tmp)."\n'
 
 function parseQrMatrix(raw) {
   var lines = String(raw || "").trim().split(/\r?\n/).filter(function(line) { return line !== "" })
@@ -1343,6 +1352,7 @@ if (typeof module !== "undefined") {
     MAX_WIFI_ROWS: MAX_WIFI_ROWS,
     ethDetectFunction: ethDetectFunction,
     createApRootHelper: createApRootHelper,
+    createApPatchedSha256: createApPatchedSha256,
     enterpriseConnectScript: enterpriseConnectScript,
     networkFailureReason: networkFailureReason,
     shouldRepromptPassphrase: shouldRepromptPassphrase,
