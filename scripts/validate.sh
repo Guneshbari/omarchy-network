@@ -34,14 +34,14 @@ check_environment() {
 
 check_required_files() {
   local missing=()
-  for file in "manifest.json" "Panel.qml" "Model.js"; do
+  for file in "manifest.json" "Panel.qml" "Model.js" "WireGuardTab.qml" "WireGuard.py"; do
     [[ ! -f "$file" ]] && missing+=("$file")
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    fail "Required files: Missing required file(s): ${missing[*]}" "Ensure manifest.json, Panel.qml, and Model.js exist at the repository root."
+    fail "Required files: Missing required file(s): ${missing[*]}" "Ensure manifest.json, Panel.qml, Model.js, WireGuardTab.qml, and WireGuard.py exist at the repository root."
   else
-    pass "Required files: manifest.json, Panel.qml, and Model.js exist."
+    pass "Required files: manifest.json, Panel.qml, Model.js, WireGuardTab.qml, and WireGuard.py exist."
   fi
 }
 
@@ -131,8 +131,8 @@ check_qml() {
   fi
 
   local qmllint_out
-  if qmllint_out=$(qmllint -I "${OMARCHY_PATH}/shell" Panel.qml 2>&1); then
-    pass "QML validation: 'qmllint -I \"\$OMARCHY_PATH/shell\" Panel.qml' passed with zero errors."
+  if qmllint_out=$(qmllint -I "${OMARCHY_PATH}/shell" Panel.qml WireGuardTab.qml 2>&1); then
+    pass "QML validation: 'qmllint -I \"\$OMARCHY_PATH/shell\" Panel.qml WireGuardTab.qml' passed with zero errors."
   else
     fail "QML validation: 'qmllint' reported errors in Panel.qml." "Fix QML syntax, binding, or import issues in Panel.qml."
     [[ -n "$qmllint_out" ]] && echo "$qmllint_out" | sed 's/^/       /'
@@ -160,7 +160,7 @@ check_tracked_safety() {
   if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r f; do
       [[ -n "$f" ]] && tracked+=("$f")
-    done < <(git ls-files)
+    done < <(git ls-files --cached --others --exclude-standard)
   else
     tracked=("Model.js" "Panel.qml" "manifest.json")
   fi
@@ -217,6 +217,16 @@ main() {
   check_omarchy
   check_qml
   check_js
+  if node --test tests/*.test.js; then
+    pass "JavaScript regression tests passed."
+  else
+    fail "JavaScript regression tests failed." "Resolve failures in tests/."
+  fi
+  if python3 -m unittest discover -s tests; then
+    pass "WireGuard regression tests passed."
+  else
+    fail "WireGuard regression tests failed." "Resolve failures in tests/."
+  fi
   check_tracked_safety
 
   echo ""
