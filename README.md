@@ -7,6 +7,11 @@ An enhanced, keyboard-driven Network bar widget and popup control center for the
 <details>
 <summary><b>📸 See additional screenshots</b></summary>
 
+### WireGuard Tab
+![WireGuard connections](screenshots/wireguard.png)
+
+Connection names in this screenshot are replaced for privacy.
+
 ### Network Panel
 ![Network Panel](screenshots/panel.png)
 
@@ -42,6 +47,11 @@ An enhanced, keyboard-driven Network bar widget and popup control center for the
   - Interactive form fields for **Addresses** (CIDR), **Gateway**, and **DNS servers**.
   - Form validation, dirty tracking, and instant Apply/Cancel buttons.
   - Direct hotkey `n` or `N` to open `nmtui` in a floating centered terminal window.
+- 🔒 **WireGuard Tab**:
+  - Lists saved NetworkManager WireGuard profiles and discovered `wg-quick` systemd services/configurations, including inactive connections.
+  - Shows each tunnel's backend, interface, and activation state, with Connect/Disconnect controls and automatic refresh while the tab is open.
+  - Uses the existing NetworkManager/systemd authorization policy; denied actions appear in the panel. It never reads or displays private keys.
+  - Root-only `/etc/wireguard` directories cannot be enumerated without elevation. Enable the corresponding `wg-quick@<interface>.service` beforehand to make those configurations discoverable; the panel does not request privileges just to list connections.
 - 🛡️ **DNS Switching**:
   - Switch system DNS in one click between **DHCP**, **Cloudflare**, **Google**, or **Custom**.
 - 📊 **Real-time Transfer & Diagnostic Metrics**:
@@ -91,6 +101,10 @@ omarchy restart shell
 | `Up` / `k` | Header / Panel | Move focus to previous section or row |
 | `Left` / `Right` or `h` / `l` | Buttons | Switch between pills or action buttons |
 | `Enter` / `Space` | Buttons | Activate highlighted button or toggle |
+| `Tab` / `Shift+Tab` | Panel | Switch between Network and WireGuard tabs |
+| `Left` / `Right` or `h` / `l` | Tab row | Switch between Network and WireGuard tabs |
+| `Down` / `j`, `Up` / `k` | WireGuard | Select a connection or return to the tab row |
+| `Enter` / `Space` | WireGuard | Connect or disconnect the selected tunnel |
 | `Tab` / `Down` | Form Fields | Move to next input field or action button |
 | `Shift+Tab` / `Up` | Form Fields | Return to previous field or method row |
 | `Escape` | Form Fields / QR Modal | Dismiss modal or cancel form editing |
@@ -120,6 +134,9 @@ You can assign any custom keybinding to the shell toggle or use direct IPC actio
 
 | Package | Type | Purpose |
 |---|---|---|
+| `python` (`python3`) | **Required** | WireGuard discovery and actions using the Python standard library |
+| `systemd` (`systemctl`) | **Required for wg-quick** | Discover and control wg-quick services |
+| `wireguard-tools` (`wg-quick`) | **Optional** | Run existing wg-quick configurations through systemd |
 | `networkmanager` (`nmcli`) | **Required** | Core Wi-Fi scanning, connections, and standard AP |
 | `iw` | **Required** | Wi-Fi radio frequencies and connected client counting |
 | `jq` | **Required** | JSON query parsing |
@@ -158,3 +175,14 @@ omarchy restart shell
 ## License
 
 [MIT](LICENSE) © 2026 Gunesh Bari
+
+## WireGuard Development Checks
+
+```bash
+python3 -m unittest discover -s tests -v
+node --test tests/*.test.js
+qmllint -I /usr/share/omarchy/shell Panel.qml WireGuardTab.qml
+python3 WireGuard.py list
+```
+
+The tests mock networking commands and do not change host connections. The `list` command reads connection metadata only. Test Connect/Disconnect manually on a disposable tunnel after installing the development plugin; active service state does not prove a successful peer handshake.

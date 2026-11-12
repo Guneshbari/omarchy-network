@@ -293,6 +293,11 @@ function wifiRow(network) {
   }
 }
 
+// These models contain JSON primitives only; reuse them so polls do not rebuild delegates.
+function stableRows(previous, next) {
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+}
+
 function sortWifiRows(rows) {
   var nets = Array.isArray(rows) ? rows.slice() : []
   nets.sort(function(a, b) {
@@ -561,23 +566,17 @@ var wiredQueryScript =
   'fi\n' +
   'if [[ -z "$con" && -n "$dev" ]]; then con="Wired connection 1"; fi\n' +
   'if [[ -n "$con" ]]; then\n' +
-  '  if nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
-  '    method=$(nmcli -g ipv4.method connection show id "$con" 2>/dev/null || echo "auto")\n' +
-  '    addr=$(nmcli -g ipv4.addresses connection show id "$con" 2>/dev/null || echo "")\n' +
-  '    gw=$(nmcli -g ipv4.gateway connection show id "$con" 2>/dev/null || echo "")\n' +
-  '    dns=$(nmcli -g ipv4.dns connection show id "$con" 2>/dev/null || echo "")\n' +
-  '  else\n' +
-  '    method="auto"; addr=""; gw=""; dns=""\n' +
-  '  fi\n' +
-  '  jq -nc --arg con "$con" --arg dev "${dev:-}" --arg method "${method:-auto}" --arg addr "${addr:-}" --arg gw "${gw:-}" --arg dns "${dns:-}" \\\n' +
-  '    \'{name: $con, device: $dev, method: $method, addresses: $addr, gateway: $gw, dns: $dns}\'\n' +
+  '  mapfile -t settings < <(nmcli -g ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns connection show uuid "$con_uuid" 2>/dev/null)\n' +
+  '  method=${settings[0]:-auto}; addr=${settings[1]:-}; gw=${settings[2]:-}; dns=${settings[3]:-}\n' +
+  '  jq -nc --arg uuid "$con_uuid" --arg con "$con" --arg dev "${dev:-}" --arg method "${method:-auto}" --arg addr "${addr:-}" --arg gw "${gw:-}" --arg dns "${dns:-}" \\\n' +
+  '    \'{uuid: $uuid, name: $con, device: $dev, method: $method, addresses: $addr, gateway: $gw, dns: $dns}\'\n' +
   'else\n' +
   '  echo "{}"\n' +
   'fi\n'
 
 var wiredApplyScript =
   ethDetectFunction +
-  'con="$1"; method="$2"; addr="$3"; gw="$4"; dns="$5"\n' +
+  'con="$1"; method="$2"; addr="$3"; gw="$4"; dns="$5"; uuid="${6:-}"\n' +
   'con=$(printf "%s" "$con" | tr -d "\\r\\n")\n' +
   'if [[ -z "$con" || "$con" == -* ]]; then con="Wired connection 1"; fi\n' +
   'if [[ "$method" != "manual" ]]; then method="auto"; fi\n' +
@@ -630,14 +629,17 @@ var wiredApplyScript =
   'if [[ -z "$dev" ]]; then dev=$(first_eth); fi\n' +
   'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi\n' +
   '\n' +
-  'if ! nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
-  '  if ! nm_out=$(nmcli connection add type ethernet con-name "$con" ${dev:+ifname "$dev"} 2>&1); then\n' +
+  'if [[ -n "$uuid" ]]; then\n' +
+  '  [[ "$uuid" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || fail "Invalid wired connection UUID"\n' +
+  '  type=$(nmcli -g connection.type connection show uuid "$uuid" 2>/dev/null) || fail "Wired connection no longer exists; refresh the panel"\n' +
+  '  [[ "$type" == "802-3-ethernet" || "$type" == "ethernet" ]] || fail "Selected connection is not Ethernet"\n' +
+  'else\n' +
+  '  uuid=$(uuidgen) || fail "Failed to generate wired connection UUID"\n' +
+  '  if ! nm_out=$(nmcli connection add type ethernet con-name "$con" connection.uuid "$uuid" ${dev:+ifname "$dev"} 2>&1); then\n' +
   '    err=$(nm_error "$nm_out")\n' +
   '    fail "Failed to create wired connection: ${err:-$nm_out}"\n' +
   '  fi\n' +
   'fi\n' +
-  'uuid=$(nmcli -g connection.uuid connection show id "$con" 2>/dev/null | head -n 1)\n' +
-  '[[ -n "$uuid" ]] || fail "Failed to find wired connection: $con"\n' +
   '\n' +
   'if [[ "$method" == "manual" ]]; then\n' +
   '  if ! nm_out=$(nmcli connection modify uuid "$uuid" ipv4.method manual ipv4.addresses "$addr" ipv4.gateway "${gw:-}" ipv4.dns "${dns:-}" 2>&1); then\n' +
@@ -655,12 +657,12 @@ var wiredApplyScript =
   'if [[ -n "$act_dev" && "$act_dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then\n' +
   '  # Live profile: re-apply in place; a full re-activation is the last resort.\n' +
   '  if ! nmcli device reapply "$act_dev" >/dev/null 2>&1; then\n' +
-  '    nmcli connection up uuid "$uuid" ifname "$act_dev" >/dev/null 2>&1 || true\n' +
+  '    nmcli --wait 30 connection up uuid "$uuid" ifname "$act_dev" >/dev/null 2>&1 || fail "Settings saved, but wired activation failed"\n' +
   '  fi\n' +
   'elif [[ -n "$dev" ]]; then\n' +
   '  st=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$dev" \'$1 == d { print $2; exit }\')\n' +
   '  if [[ "$st" == "disconnected" ]]; then\n' +
-  '    nmcli connection up uuid "$uuid" ifname "$dev" >/dev/null 2>&1 || true\n' +
+  '    nmcli --wait 30 connection up uuid "$uuid" ifname "$dev" >/dev/null 2>&1 || fail "Settings saved, but wired activation failed"\n' +
   '  fi\n' +
   'fi\n' +
   'exit 0\n'
@@ -673,10 +675,9 @@ var hotspotQueryScript =
   'has_create_ap="false"; ' +
   'if [[ -f /usr/local/bin/create_ap && ! -L /usr/local/bin/create_ap ]] && grep -q -F "/run/create_ap/create_ap." /usr/local/bin/create_ap 2>/dev/null; then has_create_ap="true"; fi; ' +
   'insecure_pkg="false"; ' +
-  'for pf in /usr/share/polkit-1/actions/*.policy; do ' +
-  '  [[ -f "$pf" ]] || continue; ' +
-  '  if grep -q -E "org\\.opensuse\\.policykit\\.(wihotspot-gui|create-ap)" "$pf" 2>/dev/null && grep -q "<allow_active>yes" "$pf" 2>/dev/null; then insecure_pkg="true"; fi; ' +
-  'done; ' +
+  'while IFS= read -r -d "" pf; do ' +
+  '  if grep -q "<allow_active>yes" "$pf" 2>/dev/null; then insecure_pkg="true"; break; fi; ' +
+  'done < <(grep -lZE "org\\.opensuse\\.policykit\\.(wihotspot-gui|create-ap)" /usr/share/polkit-1/actions/*.policy 2>/dev/null); ' +
   'eth_dev=$(detect_eth); ' +
   'eth_connected="false"; ' +
   'if [[ -n "$eth_dev" ]]; then eth_connected="true"; fi; ' +
@@ -716,18 +717,18 @@ var hotspotQueryScript =
   '    fi; ' +
   '  fi; ' +
   'done; ' +
-  'con=""; ' +
+  'con=""; con_uuid=""; ' +
   'for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
   '  mode=$(nmcli -g 802-11-wireless.mode con show "$uuid" 2>/dev/null); ' +
-  '  if [[ "$mode" == "ap" ]]; then con=$(nmcli -g connection.id con show "$uuid" 2>/dev/null); break; fi; ' +
+  '  if [[ "$mode" == "ap" ]]; then con_uuid="$uuid"; con=$(nmcli -g connection.id con show uuid "$uuid" 2>/dev/null); break; fi; ' +
   'done; ' +
   'if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
   'nm_active="false"; nm_ssid=""; nm_pwd=""; nm_band=""; ' +
-  'if nmcli connection show id "$con" >/dev/null 2>&1; then ' +
-  '  nm_ssid=$(nmcli -s -g 802-11-wireless.ssid connection show id "$con" 2>/dev/null); ' +
-  '  nm_pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show id "$con" 2>/dev/null); ' +
-  '  nm_band=$(nmcli -s -g 802-11-wireless.band connection show id "$con" 2>/dev/null); ' +
-  '  if nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con}:yes"; then nm_active="true"; fi; ' +
+  'if [[ -n "$con_uuid" ]]; then ' +
+  '  nm_ssid=$(nmcli -s -g 802-11-wireless.ssid connection show uuid "$con_uuid" 2>/dev/null); ' +
+  '  nm_pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show uuid "$con_uuid" 2>/dev/null); ' +
+  '  nm_band=$(nmcli -s -g 802-11-wireless.band connection show uuid "$con_uuid" 2>/dev/null); ' +
+  '  if nmcli -t -f UUID,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con_uuid}:yes"; then nm_active="true"; fi; ' +
   'fi; ' +
   'ap_iface=""; ' +
   'if [[ "$cap_running" == "true" ]]; then ' +
@@ -851,8 +852,8 @@ var hotspotQueryScript =
   '  if [[ -z "$client_json" || "$client_json" != "["*"]" ]]; then client_json="[]"; fi; ' +
   'fi; ' +
   'clients=$(echo "$client_json" | jq "length" 2>/dev/null || echo 0); ' +
-  'printf "%s" "${pwd:-}" | jq -Rs --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson insecureWihotspot "$insecure_pkg" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
-  '  \'{"name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "clientList": $clientList, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "insecureWihotspot": $insecureWihotspot, "wifiConnected": $wifiConnected, "connectedBand": $connectedBand, "ethernetConnected": $ethernetConnected, "repeaterCapable": $repeaterCapable}\''
+  'printf "%s" "${pwd:-}" | jq -Rs --arg uuid "$con_uuid" --arg con "$con" --arg ssid "${ssid:-Omarchy-Hotspot}" --arg band "${band:-bg}" --argjson active "$active" --arg dev "${dev:-}" --argjson clients "${clients:-0}" --argjson clientList "$client_json" --argjson hasAp "$has_ap" --argjson isRepeater "$is_repeater" --argjson hasCreateAp "$has_create_ap" --argjson insecureWihotspot "$insecure_pkg" --argjson wifiConnected "$wifi_connected" --arg connectedBand "$connected_band" --argjson ethernetConnected "$eth_connected" --argjson repeaterCapable "$repeater_capable" ' +
+  '  \'{"uuid": $uuid, "name": $con, "ssid": $ssid, "password": ., "band": $band, "active": $active, "device": $dev, "clients": $clients, "clientList": $clientList, "hasAp": $hasAp, "isRepeater": $isRepeater, "hasCreateAp": $hasCreateAp, "insecureWihotspot": $insecureWihotspot, "wifiConnected": $wifiConnected, "connectedBand": $connectedBand, "ethernetConnected": $ethernetConnected, "repeaterCapable": $repeaterCapable}\''
 
 // The password arrives on stdin and reaches nmcli through the scriptable
 // `connection edit` editor or create_ap through a protected temporary config file.
@@ -862,7 +863,7 @@ var hotspotApplyScript =
   ethDetectFunction +
   'IFS= read -r pwd\n' +
   'pwd=$(printf "%s" "$pwd" | tr -d "\\r\\n")\n' +
-  'action="$1"; con="$2"; ssid="$3"; band="$4"\n' +
+  'action="$1"; con="$2"; ssid="$3"; band="$4"; con_uuid="${5:-}"\n' +
   'if [[ "$action" != "save" && "$action" != "toggle" && "$action" != "stop" ]]; then exit 1; fi\n' +
   'con=$(printf "%s" "$con" | tr -d "\\r\\n")\n' +
   'if [[ -z "$con" || "$con" == -* ]]; then con="Hotspot"; fi\n' +
@@ -874,12 +875,21 @@ var hotspotApplyScript =
   'dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: \'$2=="wifi"{print $1; exit}\')\n' +
   'if [[ -n "$dev" && ! "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]]; then dev=""; fi\n' +
   '\n' +
+  'validate_profile() {\n' +
+  '  if [[ -n "$con_uuid" ]]; then\n' +
+  '    [[ "$con_uuid" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || { echo "Invalid hotspot UUID" >&2; exit 1; }\n' +
+  '    type=$(nmcli -g connection.type connection show uuid "$con_uuid" 2>/dev/null)\n' +
+  '    mode=$(nmcli -g 802-11-wireless.mode connection show uuid "$con_uuid" 2>/dev/null)\n' +
+  '    [[ "$type" == "802-11-wireless" && "$mode" == "ap" ]] || { echo "Hotspot profile no longer exists; refresh the panel" >&2; exit 1; }\n' +
+  '  fi\n' +
+  '}\n' +
+  '\n' +
   '# No built-in default passphrase: an empty one becomes a random per-device secret.\n' +
   'generated="false"\n' +
   'prepare_password() {\n' +
-  '  if [[ -z "$pwd" ]]; then\n' +
+  '  if [[ -z "$pwd" && -n "$con_uuid" ]]; then\n' +
   '    # Nothing supplied: keep the passphrase already saved in the profile.\n' +
-  '    pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show id "$con" 2>/dev/null | head -n 1)\n' +
+  '    pwd=$(nmcli -s -g 802-11-wireless-security.psk connection show uuid "$con_uuid" 2>/dev/null | head -n 1)\n' +
   '  fi\n' +
   '  if [[ -z "$pwd" ]]; then\n' +
   '    pwd=$(LC_ALL=C tr -dc \'A-Za-z0-9\' < /dev/urandom | head -c 16)\n' +
@@ -896,8 +906,9 @@ var hotspotApplyScript =
   '# it never appears in any argv.\n' +
   'save_profile() {\n' +
   '  local nm_out err_detail\n' +
-  '  if ! nmcli connection show id "$con" >/dev/null 2>&1; then\n' +
-  '    if ! nm_out=$(nmcli con add type wifi con-name "$con" autoconnect no ssid "$ssid" \\\n' +
+  '  if [[ -z "$con_uuid" ]]; then\n' +
+  '    con_uuid=$(uuidgen) || exit 1\n' +
+  '    if ! nm_out=$(nmcli con add type wifi con-name "$con" connection.uuid "$con_uuid" autoconnect no ssid "$ssid" \\\n' +
   '      802-11-wireless.mode ap 802-11-wireless.band "$band" \\\n' +
   '      802-11-wireless-security.key-mgmt wpa-psk \\\n' +
   '      802-11-wireless-security.proto rsn \\\n' +
@@ -910,21 +921,22 @@ var hotspotApplyScript =
   '      exit 1\n' +
   '    fi\n' +
   '  else\n' +
-  '    nmcli con modify id "$con" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" \\\n' +
+  '    nmcli con modify uuid "$con_uuid" 802-11-wireless.ssid "$ssid" 802-11-wireless.band "$band" \\\n' +
   '      802-11-wireless-security.key-mgmt wpa-psk \\\n' +
   '      802-11-wireless-security.proto rsn \\\n' +
   '      802-11-wireless-security.pairwise ccmp \\\n' +
   '      802-11-wireless-security.group ccmp \\\n' +
   '      802-11-wireless-security.pmf 1 \\\n' +
-  '      ipv6.method ignore >/dev/null 2>&1 || true\n' +
+  '      ipv6.method ignore >/dev/null 2>&1 || { echo "Failed to update hotspot settings" >&2; exit 1; }\n' +
   '  fi\n' +
-  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit id "$con" >/dev/null 2>&1; then\n' +
+  '  if ! printf "set 802-11-wireless-security.psk %s\\nsave\\nquit\\n" "$pwd" | nmcli connection edit uuid "$con_uuid" >/dev/null 2>&1; then\n' +
   '    echo "Failed to configure hotspot password" >&2\n' +
   '    exit 1\n' +
   '  fi\n' +
   '}\n' +
   '\n' +
   'if [[ "$action" == "save" ]]; then\n' +
+  '  validate_profile\n' +
   '  prepare_password\n' +
   '  save_profile\n' +
   '  exit 0\n' +
@@ -952,18 +964,21 @@ var hotspotApplyScript =
   'is_running="false"\n' +
   'if find_ap; then\n' +
   '  is_running="true"\n' +
-  'elif nmcli -t -f NAME,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con}:yes"; then\n' +
+  'elif nmcli -t -f UUID,ACTIVE connection show 2>/dev/null | grep -q -F -x "${con_uuid}:yes"; then\n' +
   '  is_running="true"\n' +
   'fi\n' +
   '\n' +
   'if [[ "$action" == "stop" ]] || [[ "$action" == "toggle" && "$is_running" == "true" ]]; then\n' +
   '  if [[ -n "$ap_pid" ]]; then\n' +
-  '    pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || true\n' +
+  '    pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || { echo "Hotspot stop failed or authorization was denied" >&2; exit 1; }\n' +
   '  fi\n' +
-  '  nmcli con down id "$con" >/dev/null 2>&1 || true\n' +
+  '  if [[ -z "$ap_pid" && "$is_running" == "true" && -n "$con_uuid" ]]; then\n' +
+  '    nmcli con down uuid "$con_uuid" >/dev/null 2>&1 || { echo "Failed to stop hotspot" >&2; exit 1; }\n' +
+  '  fi\n' +
   '  exit 0\n' +
   'fi\n' +
   '\n' +
+  'validate_profile\n' +
   'prepare_password\n' +
   '\n' +
   'eth_dev=$(detect_eth)\n' +
@@ -1133,7 +1148,7 @@ var hotspotApplyScript =
   '          if [[ "$have_ip" == "true" && "$have_dhcp" == "true" ]]; then exit 0; fi\n' +
   '          sleep 0.5\n' +
   '        done\n' +
-  '        pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || true\n' +
+  '        pkexec bash -c "$ap_helper" create-ap-root stop >/dev/null 2>&1 || { echo "Hotspot stop failed or authorization was denied" >&2; exit 1; }\n' +
   '        save_log\n' +
   '        if [[ "$have_ip" != "true" ]]; then\n' +
   '          echo "Hotspot stopped: $viface lost its address ${gw}. Another network service (NetworkManager, iwd or systemd-networkd) is reconfiguring the access-point interface." >&2\n' +
@@ -1176,7 +1191,7 @@ var hotspotApplyScript =
   '    fi\n' +
   '  fi\n' +
   '  save_profile\n' +
-  '  if ! nm_out=$(nmcli con up id "$con" 2>&1); then\n' +
+  '  if ! nm_out=$(nmcli con up uuid "$con_uuid" 2>&1); then\n' +
   '    err_detail=$(echo "$nm_out" | grep -m 1 -i "error:" | sed \'s/^[Ee]rror:[[:space:]]*//\')\n' +
   '    echo "Failed to start hotspot: ${err_detail:-$nm_out}" >&2\n' +
   '    exit 1\n' +
@@ -1194,16 +1209,16 @@ var hotspotQrScript =
   '  con=""; ' +
   '  for uuid in $(nmcli -t -f UUID,TYPE con show 2>/dev/null | awk -F: \'$2=="802-11-wireless"{print $1}\'); do ' +
   '    mode=$(nmcli -g 802-11-wireless.mode con show "$uuid" 2>/dev/null); ' +
-  '    if [[ "$mode" == "ap" ]]; then con=$(nmcli -g connection.id con show "$uuid" 2>/dev/null); break; fi; ' +
+  '    if [[ "$mode" == "ap" ]]; then con="$uuid"; break; fi; ' +
   '  done; ' +
   '  if [[ -z "$con" ]]; then con="Hotspot"; fi; ' +
   '  if [[ -z "$ssid" ]]; then ' +
-  '    nm_s=$(nmcli -s -g 802-11-wireless.ssid connection show id "$con" 2>/dev/null || true); ' +
+  '    nm_s=$(nmcli -s -g 802-11-wireless.ssid connection show uuid "$con" 2>/dev/null || true); ' +
   '    ssid="${nm_s:-Omarchy-Hotspot}"; ' +
   '    ssid=$(printf "%s" "$ssid" | tr -d "\\r\\n"); ' +
   '  fi; ' +
   '  if [[ -z "$pwd" ]]; then ' +
-  '    nm_p=$(nmcli -s -g 802-11-wireless-security.psk connection show id "$con" 2>/dev/null || true); ' +
+  '    nm_p=$(nmcli -s -g 802-11-wireless-security.psk connection show uuid "$con" 2>/dev/null || true); ' +
   '    pwd="$nm_p"; ' +
   '    pwd=$(printf "%s" "$pwd" | tr -d "\\r\\n"); ' +
   '  fi; ' +
@@ -1344,6 +1359,7 @@ if (typeof module !== "undefined") {
     formatPingLatency: formatPingLatency,
     wifiRow: wifiRow,
     sortWifiRows: sortWifiRows,
+    stableRows: stableRows,
     wifiSectionTitle: wifiSectionTitle,
     requiresCredentials: requiresCredentials,
     canForgetNetwork: canForgetNetwork,

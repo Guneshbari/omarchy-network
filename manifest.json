@@ -5,7 +5,7 @@
   "version": "1.2.0",
   "author": "Gunesh Bari",
   "license": "MIT",
-  "description": "Complete network manager for Omarchy featuring Wi-Fi, simultaneous Wi-Fi Repeater chaining & Hotspot AP with centered QR sharing, verified 1-click create_ap installer, DNS selection, and interactive Wired Ethernet configuration (DHCP & Static IP) with full keyboard navigation.",
+  "description": "Complete network manager for Omarchy featuring Wi-Fi, simultaneous Wi-Fi Repeater chaining & Hotspot AP with centered QR sharing, verified 1-click create_ap installer, DNS selection, and interactive Wired Ethernet configuration (DHCP & Static IP) with full keyboard navigation. Includes a WireGuard tab for NetworkManager profiles and wg-quick services.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Network",
-    "description": "Network status, Wi-Fi, Repeater, Hotspot, wired Ethernet, and DNS",
+    "description": "Network status, Wi-Fi, Repeater, Hotspot, wired Ethernet, and DNS, and WireGuard",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"

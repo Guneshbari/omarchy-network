@@ -31,6 +31,93 @@ Panel {
     domainText = ""
   }
 
+  property string networkTab: "network"
+  readonly property bool networkVisible: opened && networkTab === "network"
+  property int tabIndex: 0
+  property var wireguardConnections: []
+  property var wireguardWarnings: []
+  property string wireguardError: ""
+  property string wireguardPendingId: ""
+  property int wireguardIndex: -1
+
+  function selectNetworkTab(index) {
+    tabIndex = (index + 2) % 2
+    networkTab = tabIndex === 0 ? "network" : "wireguard"
+    cancelPasswordPrompt()
+    if (hotspotEditing) cancelHotspotEdit()
+    cursorActive = true
+    focusSection = "tabs"
+    scanRestart.stop()
+    setScannerEnabled(false)
+    prevSampleTime = 0
+    if (networkTab === "network") refresh(true)
+    else refreshWireguard()
+    keyCatcher.forceActiveFocus()
+  }
+
+  function refreshWireguard() {
+    if (!opened || networkTab !== "wireguard" || wireguardQuery.running || wireguardAction.running) return
+    wireguardQuery.running = true
+  }
+
+  function activateWireguard(connection) {
+    if (!connection || wireguardPendingId !== "" || connection.state === "activating" || connection.state === "deactivating") return
+    wireguardPendingId = connection.id
+    wireguardError = ""
+    wireguardAction.command = ["python3", decodeURIComponent(Qt.resolvedUrl("WireGuard.py").toString().replace(/^file:\/\//, "")), "action", connection.backend, connection.id,
+                               connection.active ? "disconnect" : "connect"]
+    wireguardAction.running = true
+  }
+
+  Process {
+    id: wireguardQuery
+    property string error: ""
+    command: ["python3", decodeURIComponent(Qt.resolvedUrl("WireGuard.py").toString().replace(/^file:\/\//, "")), "list"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var result = JSON.parse(text)
+          if (result.error) { wireguardQuery.error = result.error; return }
+          wireguardQuery.error = ""
+          var previous = root.wireguardConnections[root.wireguardIndex]
+          root.wireguardConnections = Model.stableRows(root.wireguardConnections, result.connections || [])
+          root.wireguardWarnings = Model.stableRows(root.wireguardWarnings, result.warnings || [])
+          var index = previous ? root.wireguardConnections.findIndex(function(row) { return row.id === previous.id }) : -1
+          root.wireguardIndex = root.wireguardConnections.length ? Math.max(0, index) : -1
+        } catch (error) { wireguardQuery.error = "Could not read WireGuard status." }
+      }
+    }
+    onExited: function(code) {
+      if (code !== 0 && wireguardQuery.error === "") wireguardQuery.error = "Could not query WireGuard. Check that Python 3, nmcli, and systemctl are installed."
+    }
+  }
+
+  Process {
+    id: wireguardAction
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var result = JSON.parse(text)
+          if (result.error) root.wireguardError = result.error
+        } catch (error) { root.wireguardError = "WireGuard action failed." }
+      }
+    }
+    onExited: function(code) {
+      root.wireguardPendingId = ""
+      if (code !== 0 && root.wireguardError === "") root.wireguardError = "WireGuard action failed or authorization was denied."
+      root.refreshWireguard()
+    }
+  }
+
+  Timer {
+    interval: 5000
+    repeat: true
+    running: root.opened && root.networkTab === "wireguard"
+    onTriggered: root.refreshWireguard()
+  }
+
   // Live connection details from `ip` / /sys / iw.
   property var info: ({})  // { iface, type, ip, prefix, gateway, speed, duplex, ssid, signal, freq, bitrate, rx_bytes, tx_bytes, router_ping_ms, internet_ping_ms }
 
@@ -103,6 +190,7 @@ Panel {
   property string domainText: ""
 
   // Wired connection state
+  property string wiredConnectionUuid: ""
   property string wiredConnectionName: "Wired connection 1"
   property string wiredDeviceName: ""
   property string wiredMethod: "auto"
@@ -125,6 +213,7 @@ Panel {
 
   // Hotspot state
   property bool hasHotspotSupport: true
+  property string hotspotUuid: ""
   property string hotspotName: "Hotspot"
   property string hotspotSsid: "Omarchy-Hotspot"
   property string hotspotPassword: ""
@@ -186,7 +275,6 @@ Panel {
   property string focusSection: "dns"  // "header" | "band" | "hotspot" | "wired" | "dns" | "wifi"
   property int headerIndex: 0
   readonly property bool canDisconnect: !!connectedWifiNetwork
-  readonly property bool headerHasDisconnect: false
   readonly property bool canShareWifi: (info.type === "wifi" && canShareNetwork(connectedWifiNetwork)) || root.hotspotActive
   // The hero switch is the Wi-Fi radio, so it only exists when there is a
   // radio to switch. On a wired box it would otherwise sit there reading
@@ -447,7 +535,7 @@ Panel {
       if (scannerDevice) scannerDevice.scannerEnabled = false
       return
     }
-    var nextDevice = opened ? wifiDevice : null
+    var nextDevice = networkVisible ? wifiDevice : null
 
     if (scannerDevice && scannerDevice !== nextDevice)
       scannerDevice.scannerEnabled = false
@@ -480,7 +568,8 @@ Panel {
       refresh(true)
       selectedIndex = wifiNetworks.length > 0 ? 0 : -1
       wifiActionFocused = false
-      focusSection = wifiNetworks.length > 0 ? "wifi" : "dns"
+      focusSection = "tabs"
+      refreshWireguard()
       var idx = dnsProviders.indexOf(dnsProvider)
       dnsIndex = idx >= 0 ? idx : 0
       syncBandIndex()
@@ -657,6 +746,7 @@ Panel {
     stdinEnabled: true
     onStarted: {
       write(textToCopy)
+      stdinEnabled = false
       textToCopy = ""
     }
     onExited: textToCopy = ""
@@ -750,7 +840,8 @@ Panel {
   }
 
   function copyToClipboard(value, sensitive) {
-    if (!value) return
+    if (!value || clipboardProc.running) return
+    clipboardProc.stdinEnabled = true
     clipboardProc.sensitive = !!sensitive
     clipboardProc.textToCopy = String(value)
     clipboardProc.running = true
@@ -783,6 +874,7 @@ Panel {
   function refresh(scanWifi) {
     if (scanWifi === undefined) scanWifi = false
     if (!detailsProc.running) detailsProc.running = true
+    if (!networkVisible) { refreshWireguard(); return }
     if (!dnsProc.running) {
       dnsProc.command = ["omarchy-dns"]
       dnsProc.running = true
@@ -805,6 +897,7 @@ Panel {
       }
     }
     syncWifiNetworks()
+    refreshWireguard()
   }
 
   function formatHeaderSpeed(mbps) {
@@ -936,7 +1029,7 @@ Panel {
       var row = Model.wifiRow(network)
       if (row) nets.push(row)
     }
-    wifiNetworks = Model.sortWifiRows(nets)
+    wifiNetworks = Model.stableRows(wifiNetworks, Model.sortWifiRows(nets))
     wifiStationAvailable = !!wifiDevice
     scanning = false
   }
@@ -1027,6 +1120,7 @@ Panel {
     try {
       var data = JSON.parse(raw.trim())
       if (data && data.name) {
+        root.wiredConnectionUuid = data.uuid || ""
         root.wiredConnectionName = data.name
         root.wiredDeviceName = data.device || ""
         root.wiredMethod = data.method || "auto"
@@ -1045,7 +1139,7 @@ Panel {
 
   function refreshWired() {
     if (!wiredProc.running) {
-      wiredProc.command = ["bash", "-c", Model.wiredQueryScript]
+      wiredProc.command = ["timeout", "10s", "bash", "-c", Model.wiredQueryScript]
       wiredProc.running = true
     }
   }
@@ -1123,7 +1217,8 @@ Panel {
       targetMethod,
       root.wiredAddresses,
       root.wiredGateway,
-      root.wiredDns
+      root.wiredDns,
+      root.wiredConnectionUuid
     ]
     wiredApplyProc.running = true
     root.wiredFormDirty = false
@@ -1165,14 +1260,15 @@ Panel {
       if (data) {
         root.hasHotspotSupport = !!data.hasAp
         root.hotspotInsecurePackage = !!data.insecureWihotspot
+        root.hotspotUuid = data.uuid || ""
         root.hotspotName = data.name || "Hotspot"
         root.hotspotSsid = data.ssid || "Omarchy-Hotspot"
-        root.hotspotPassword = data.password || ""
+        root.hotspotPassword = (root.networkVisible || root.hotspotQrOpen) ? (data.password || "") : ""
         root.hotspotBand = data.band || "bg"
         root.hotspotActive = !!data.active
         root.hotspotDevice = data.device || ""
         root.hotspotClients = data.clients || 0
-        root.hotspotClientList = Array.isArray(data.clientList) ? data.clientList : []
+        root.hotspotClientList = Model.stableRows(root.hotspotClientList, Array.isArray(data.clientList) ? data.clientList : [])
         root.hotspotIsRepeater = !!data.isRepeater
         root.hotspotHasCreateAp = !!data.hasCreateAp
         root.hotspotWifiConnected = !!data.wifiConnected
@@ -1200,7 +1296,7 @@ Panel {
 
   function refreshHotspot() {
     if (!hotspotProc.running) {
-      hotspotProc.command = ["bash", "-c", Model.hotspotQueryScript]
+      hotspotProc.command = ["timeout", "10s", "bash", "-c", Model.hotspotQueryScript]
       hotspotProc.running = true
     }
   }
@@ -1221,7 +1317,8 @@ Panel {
       "toggle",
       root.hotspotName || "Hotspot",
       root.hotspotSsid || "Omarchy-Hotspot",
-      effectiveBand
+      effectiveBand,
+      root.hotspotUuid
     ]
     hotspotApplyProc.running = true
   }
@@ -1276,7 +1373,8 @@ Panel {
       "save",
       root.hotspotName || "Hotspot",
       draftSsid,
-      effectiveBand
+      effectiveBand,
+      root.hotspotUuid
     ]
     hotspotApplyProc.running = true
   }
@@ -1544,7 +1642,7 @@ Panel {
     interval: 100
     repeat: false
     onTriggered: {
-      if (root.opened && root.wifiDevice && !root.hotspotActive) {
+      if (root.networkVisible && root.wifiDevice && !root.hotspotActive) {
         root.setScannerEnabled(true)
         scanDone.start()
       }
@@ -1581,7 +1679,7 @@ Panel {
     id: bandPoll
     interval: 4000
     repeat: true
-    running: root.opened && !root.hotspotActive
+    running: root.networkVisible && !root.hotspotActive
     onTriggered: {
       if (bandProc.running) return
       bandProc.command = ["omarchy-network-band"]
@@ -1614,7 +1712,7 @@ Panel {
 
   Process {
     id: wiredProc
-    command: ["bash", "-c", Model.wiredQueryScript]
+    command: ["timeout", "10s", "bash", "-c", Model.wiredQueryScript]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateWired(text)
@@ -1636,7 +1734,6 @@ Panel {
       if (exitCode === 0) {
         root.wiredStatusMsg = "Applied"
         root.wiredStatusIsError = false
-        root.refreshWired()
         root.refresh()
       } else {
         root.wiredStatusMsg = wiredApplyErr.text ? wiredApplyErr.text.trim() : "Failed to apply"
@@ -1647,7 +1744,7 @@ Panel {
 
   Process {
     id: hotspotProc
-    command: ["bash", "-c", Model.hotspotQueryScript]
+    command: ["timeout", "10s", "bash", "-c", Model.hotspotQueryScript]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateHotspot(text)
@@ -1677,7 +1774,6 @@ Panel {
         root.hotspotEditing = false
         root.hotspotStatusMsg = ""
         root.hotspotStatusIsError = false
-        root.refreshHotspot()
         root.refresh()
       } else {
         root.hotspotStatusMsg = hotspotApplyErr.text ? hotspotApplyErr.text.trim() : "Failed to execute"
@@ -1741,7 +1837,7 @@ Panel {
     id: detailsPoll
     interval: 2000
     repeat: true
-    running: root.opened
+    running: root.networkVisible
     onTriggered: {
       if (!detailsProc.running) detailsProc.running = true
       if (!hotspotProc.running && !hotspotApplyProc.running) root.refreshHotspot()
@@ -1751,7 +1847,7 @@ Panel {
   Timer {
     id: connectionPhraseTimer
     interval: 2800
-    running: root.opened && (root.info.type === "ethernet" || (root.info.type === "wifi" && root.canDisconnect))
+    running: root.networkVisible && (root.info.type === "ethernet" || (root.info.type === "wifi" && root.canDisconnect))
     repeat: true
     onTriggered: connectionPhraseSwap.restart()
   }
@@ -1846,6 +1942,18 @@ Panel {
       blocked: root.passwordSsid !== "" || root.wiredInputFocused || root.hotspotInputFocused
 
       onMoveRequested: function(dx, dy) {
+        if (root.focusSection === "tabs") {
+          root.cursorActive = true
+          if (dx !== 0) root.selectNetworkTab(root.tabIndex + dx)
+          if (dy > 0) root.focusSection = root.networkTab === "wireguard" ? "wireguard" : (root.headerActionCount > 0 ? "header" : "dns")
+          return
+        }
+        if (root.networkTab === "wireguard") {
+          root.cursorActive = true
+          if (dy < 0 && root.wireguardIndex <= 0) root.focusSection = "tabs"
+          else if (dy !== 0 && root.wireguardConnections.length) root.wireguardIndex = Math.max(0, Math.min(root.wireguardConnections.length - 1, root.wireguardIndex + dy))
+          return
+        }
         if (!root.cursorActive) {
           root.cursorActive = true
           if (dy >= 0) return
@@ -1853,6 +1961,7 @@ Panel {
         if (dy !== 0) {
           // Vertical order is header ⇄ band ⇄ hotspot ⇄ wired ⇄ DNS ⇄ wifi
           if (root.focusSection === "header") {
+            if (dy < 0) root.focusSection = "tabs"
             if (dy > 0) {
               if (root.canSelectBand) {
                 root.focusSection = "band"
@@ -1993,6 +2102,11 @@ Panel {
         }
       }
       onActivateRequested: {
+        if (root.focusSection === "tabs") { root.selectNetworkTab(root.tabIndex); return }
+        if (root.networkTab === "wireguard") {
+          root.activateWireguard(root.wireguardConnections[root.wireguardIndex])
+          return
+        }
         if (root.cursorActive) {
           if (root.focusSection === "header") root.activateHeader()
           else if (root.focusSection === "band") root.activateBand()
@@ -2005,10 +2119,11 @@ Panel {
       onCloseRequested: {
         root.close()
       }
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) { root.selectNetworkTab(root.tabIndex + direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refresh()
-        else if (t === "w" || t === "W") root.toggleNetwork()
+        if (t === "r" || t === "R") { root.wireguardError = ""; wireguardQuery.error = ""; root.refresh(true); return }
+        if (root.networkTab === "wireguard") return
+        if (t === "w" || t === "W") root.toggleNetwork()
         else if (t === "n" || t === "N") root.openNmtui()
         else if (t === "h" || t === "H") root.toggleHotspot()
       }
@@ -2020,6 +2135,51 @@ Panel {
       anchors.right: parent.right
       anchors.top: parent.top
       spacing: Style.space(12)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+        Repeater {
+          model: ["Network", "WireGuard"]
+          Button {
+            required property string modelData
+            required property int index
+            width: (column.width - Style.space(6)) / 2
+            text: modelData
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            active: root.tabIndex === index
+            hasCursor: root.cursorActive && root.focusSection === "tabs" && root.tabIndex === index
+            onClicked: root.selectNetworkTab(index)
+          }
+        }
+      }
+
+      WireGuardTab {
+        width: parent.width
+        visible: root.networkTab === "wireguard"
+        foreground: root.bar.foreground
+        fontFamily: root.bar.fontFamily
+        connections: root.wireguardConnections
+        warnings: root.wireguardWarnings
+        error: root.wireguardError || wireguardQuery.error
+        pendingId: root.wireguardPendingId
+        loading: wireguardQuery.running
+        cursorActive: root.cursorActive && root.focusSection === "wireguard"
+        selectedIndex: root.wireguardIndex
+        onActivate: function(connection) { root.activateWireguard(connection) }
+        onSelectRow: function(index) {
+          root.wireguardIndex = index
+          root.focusSection = "wireguard"
+          root.cursorActive = true
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(12)
+        visible: root.networkTab === "network"
 
       // ---------- Hero: network icon · SSID + state · actions ----------
       Item {
@@ -2909,7 +3069,7 @@ Panel {
 
             TextField {
               id: hotspotSsidField
-              maxLength: 32
+              maximumLength: 32
               width: parent.width
               text: root.hotspotDraftSsid
               font.family: root.bar.fontFamily
@@ -2955,7 +3115,7 @@ Panel {
 
             TextField {
               id: hotspotPasswordField
-              maxLength: 63
+              maximumLength: 63
               width: parent.width
               text: root.hotspotDraftPassword
               font.family: root.bar.fontFamily
@@ -3269,7 +3429,7 @@ Panel {
 
             TextField {
               id: wiredAddrField
-              maxLength: 128
+              maximumLength: 128
               width: parent.width
               placeholderText: "e.g. 192.168.1.50/24"
               text: root.wiredAddresses
@@ -3331,7 +3491,7 @@ Panel {
 
             TextField {
               id: wiredGwField
-              maxLength: 45
+              maximumLength: 45
               width: parent.width
               placeholderText: "e.g. 192.168.1.1"
               text: root.wiredGateway
@@ -3379,7 +3539,7 @@ Panel {
 
             TextField {
               id: wiredDnsField
-              maxLength: 128
+              maximumLength: 128
               width: parent.width
               placeholderText: "e.g. 1.1.1.1, 8.8.8.8"
               text: root.wiredDns
@@ -3643,6 +3803,7 @@ Panel {
             }
           }
         }
+      }
       }
     }
   }
@@ -3969,7 +4130,7 @@ Panel {
 
       TextField {
         id: idField
-        maxLength: 128
+        maximumLength: 128
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -4001,7 +4162,7 @@ Panel {
 
       TextField {
         id: domainField
-        maxLength: 253
+        maximumLength: 253
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -4033,7 +4194,7 @@ Panel {
 
       TextField {
         id: pwField
-        maxLength: 128
+        maximumLength: 128
         visible: !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
