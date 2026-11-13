@@ -2909,7 +2909,7 @@ Panel {
 
             TextField {
               id: hotspotSsidField
-              maxLength: 32
+              maximumLength: 32
               width: parent.width
               text: root.hotspotDraftSsid
               font.family: root.bar.fontFamily
@@ -2955,7 +2955,7 @@ Panel {
 
             TextField {
               id: hotspotPasswordField
-              maxLength: 63
+              maximumLength: 63
               width: parent.width
               text: root.hotspotDraftPassword
               font.family: root.bar.fontFamily
@@ -3269,7 +3269,7 @@ Panel {
 
             TextField {
               id: wiredAddrField
-              maxLength: 128
+              maximumLength: 128
               width: parent.width
               placeholderText: "e.g. 192.168.1.50/24"
               text: root.wiredAddresses
@@ -3331,7 +3331,7 @@ Panel {
 
             TextField {
               id: wiredGwField
-              maxLength: 45
+              maximumLength: 45
               width: parent.width
               placeholderText: "e.g. 192.168.1.1"
               text: root.wiredGateway
@@ -3379,7 +3379,7 @@ Panel {
 
             TextField {
               id: wiredDnsField
-              maxLength: 128
+              maximumLength: 128
               width: parent.width
               placeholderText: "e.g. 1.1.1.1, 8.8.8.8"
               text: root.wiredDns
@@ -3969,7 +3969,7 @@ Panel {
 
       TextField {
         id: idField
-        maxLength: 128
+        maximumLength: 128
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -4001,7 +4001,7 @@ Panel {
 
       TextField {
         id: domainField
-        maxLength: 253
+        maximumLength: 253
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -4033,7 +4033,7 @@ Panel {
 
       TextField {
         id: pwField
-        maxLength: 128
+        maximumLength: 128
         visible: !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
